@@ -42,9 +42,9 @@ export async function POST(req: NextRequest) {
     const upstreamBaseUrl = process.env.LLAMA_SERVER_URL || DEFAULT_UPSTREAM_URL;
     const upstreamEndpoint = `${upstreamBaseUrl}/v1/chat/completions`;
 
-    // 3. 60 saniyelik bir bağlantı zaman aşımı (timeout) tanımla
+    // 3. 120 saniyelik bir bağlantı zaman aşımı (timeout) tanımla
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
 
     try {
       // 4. Sistem Mesajı (Cyber AI Kimliği) ve İstek Yönlendirme
@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
           messages: formattedMessages,
           stream: true, // Akış (streaming) modunu etkinleştiriyoruz
           temperature: 0.7,
-          max_tokens: 2048,
+          max_tokens: 8192,
         }),
         signal: controller.signal,
       });
