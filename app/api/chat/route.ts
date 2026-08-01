@@ -47,24 +47,29 @@ export async function POST(req: NextRequest) {
     const timeoutId = setTimeout(() => controller.abort(), 60000);
 
     try {
-      // 4. Oracle sunucusundaki llama.cpp API'sine isteği yönlendir
+      // 4. Sistem Mesajı (Cyber AI Kimliği) ve İstek Yönlendirme
+      const systemMessage = {
+        role: "system",
+        content: "Sen Cyber AI'sın (veya kısaca Cyber). Oracle Cloud üzerinde çalışan, yüksek performanslı ve özel bir yapay zeka asistanısın. Kim olduğun sorulduğunda asla 'Qwen' veya 'Alibaba' olduğunu söyleme; kendini her zaman 'Cyber AI' olarak tanıt."
+      };
+
+      // Kullanıcı mesajlarının en başına sistem mesajını enjekte ediyoruz
+      const formattedMessages = [systemMessage, ...messages];
+
       const upstreamResponse = await fetch(upstreamEndpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          // Gerekirse buraya API anahtarı veya ek başlıklar eklenebilir
         },
         body: JSON.stringify({
-          model: "qwen2.5-14b", // llama.cpp server model parametresini genellikle yok sayar veya eşleştirir
-          messages: messages,
-          stream: true, // Akış (streaming) modunu etkinleştiriyoruz
+          model: "Cyber", // Sunucumuzdaki alias ile birebir aynı yapıyoruz
+          messages: formattedMessages,
+          stream: true,
           temperature: 0.7,
           max_tokens: 2048,
         }),
         signal: controller.signal,
       });
-
-      clearTimeout(timeoutId);
 
       // 5. Upstream hata durumlarını yönet
       if (!upstreamResponse.ok) {
