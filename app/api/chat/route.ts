@@ -62,7 +62,6 @@ export async function POST(req: NextRequest) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          // Gerekirse buraya API anahtarı veya ek başlıklar eklenebilir
         },
         body: JSON.stringify({
           model: "models/qwen2.5-14b.gguf", // Sunucumuzdaki gerçek model id'si ile eşleştiriyoruz (GET /v1/models çıktısına göre)
@@ -73,8 +72,6 @@ export async function POST(req: NextRequest) {
         }),
         signal: controller.signal,
       });
-
-      clearTimeout(timeoutId);
 
       // 5. Upstream hata durumlarını yönet
       if (!upstreamResponse.ok) {

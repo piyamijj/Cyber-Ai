@@ -351,7 +351,7 @@ export default function CyberChat() {
         <div className="p-4 border-t border-cyber-border bg-cyber-bg/50">
           <div className="flex items-center gap-2 text-xs text-cyber-muted">
             <Terminal className="h-3.5 w-3.5 text-cyber-accent" />
-            <span>Qwen2.5-14B · Oracle Cloud</span>
+            <span>Cyber-Aİ v1 • Cyber</span>
           </div>
         </div>
       </aside>
@@ -395,7 +395,7 @@ export default function CyberChat() {
                   Siber Dünyaya Hoş Geldiniz
                 </h2>
                 <p className="text-sm text-cyber-muted">
-                  Oracle Cloud üzerinde barındırılan Qwen2.5-14B modeli ile çalışan, sade ve karanlık temalı sohbet arayüzü.
+                  Oracle Cloud üzerinde barındırılan CyberAiv1 modeli ile çalışan, sade ve karanlık temalı sohbet arayüzü.
                 </p>
               </div>
 
@@ -500,7 +500,7 @@ export default function CyberChat() {
               </button>
             </form>
             <div className="mt-2 text-center text-[10px] text-cyber-muted">
-              Cyber AI, Oracle Cloud sunucunuzdaki Qwen2.5-14B modelini kullanır.
+              Cyber AI, Oracle Cloud sunucunuzdaki CyberAiv1 modelini kullanır.
             </div>
           </div>
         </div>
