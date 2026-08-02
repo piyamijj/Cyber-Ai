@@ -175,13 +175,18 @@ async def search_memory(request: SearchRequest):
         
         limit = request.top_k or SEARCH_TOP_K
 
-        # Qdrant üzerinde vektörel arama yapıyoruz
-        search_results = qdrant_client.search(
+        # Qdrant üzerinde vektörel arama yapıyoruz.
+        # NOT: qdrant-client'ın yeni sürümlerinde eski `.search()` metodu kaldırıldı,
+        # yerine `.query_points()` geldi. Bu metod bir `QueryResponse` nesnesi döner,
+        # asıl sonuç listesi ise onun `.points` alanındadır (eski `.search()`'ün
+        # döndürdüğü düz listeden farklı olarak).
+        query_response = qdrant_client.query_points(
             collection_name=COLLECTION_NAME,
-            query_vector=query_vector,
+            query=query_vector,
             limit=limit,
             score_threshold=SEARCH_SCORE_THRESHOLD
         )
+        search_results = query_response.points
 
         results = []
         for hit in search_results:
@@ -198,12 +203,13 @@ async def search_memory(request: SearchRequest):
         # Bu sayede SEARCH_SCORE_THRESHOLD değerini ileride doğru ayarlayabiliriz.
         if not found:
             try:
-                raw_results = qdrant_client.search(
+                raw_query_response = qdrant_client.query_points(
                     collection_name=COLLECTION_NAME,
-                    query_vector=query_vector,
+                    query=query_vector,
                     limit=1,
                     score_threshold=None
                 )
+                raw_results = raw_query_response.points
                 if raw_results:
                     logger.info(
                         f"KALİBRASYON: Eşik altında kalan en yüksek skor: {raw_results[0].score:.4f} "
