@@ -32,7 +32,10 @@ EMBEDDING_MODEL_NAME = "BAAI/bge-base-en-v1.5"
 # Arama için varsayılan parametreler
 SEARCH_TOP_K = int(os.getenv("SEARCH_TOP_K", "5"))
 # Cosine similarity için eşik değer. Alakasız geçmiş bilgileri elemek için kullanılır.
-SEARCH_SCORE_THRESHOLD = float(os.getenv("SEARCH_SCORE_THRESHOLD", "0.45"))
+# NOT: BAAI/bge-base-en-v1.5 İngilizce odaklı bir model olduğu için Türkçe metinlerde
+# gerçek eşleşmeler bile daha düşük skorlar üretebilir (ör. 0.3-0.5 aralığı). Bu yüzden
+# eşiği düşük tutuyoruz; çok fazla alakasız sonuç gelirse ileride yükseltilebilir.
+SEARCH_SCORE_THRESHOLD = float(os.getenv("SEARCH_SCORE_THRESHOLD", "0.2"))
 
 # 3. GLOBAL MODEL VE İSTEMCİ BAŞLATMALARI
 # Servis her istekte modeli baştan yüklemesin diye global olarak bir kez başlatıyoruz.
@@ -190,6 +193,25 @@ async def search_memory(request: SearchRequest):
             ))
 
         found = len(results) > 0
+
+        # KALİBRASYON LOGU: eşik uygulanmadan en iyi skorun ne olduğunu da görelim.
+        # Bu sayede SEARCH_SCORE_THRESHOLD değerini ileride doğru ayarlayabiliriz.
+        if not found:
+            try:
+                raw_results = qdrant_client.search(
+                    collection_name=COLLECTION_NAME,
+                    query_vector=query_vector,
+                    limit=1,
+                    score_threshold=None
+                )
+                if raw_results:
+                    logger.info(
+                        f"KALİBRASYON: Eşik altında kalan en yüksek skor: {raw_results[0].score:.4f} "
+                        f"(mevcut eşik: {SEARCH_SCORE_THRESHOLD}) | Metin: '{(raw_results[0].payload or {}).get('text', '')[:60]}...'"
+                    )
+            except Exception as calib_err:
+                logger.warning(f"Kalibrasyon sorgusu başarısız oldu: {calib_err}")
+
         logger.info(
             f"Hafıza araması tamamlandı. Sorgu: '{request.query[:30]}...' "
             f"| Bulunan kayıt sayısı: {len(results)} | En yüksek skor: {results[0].score if found else 'Yok'}"
