@@ -12,7 +12,8 @@
     "next": "14.2.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "lucide-react": "^0.424.0"
+    "lucide-react": "^0.424.0",
+    "@vercel/functions": "^1.5.0"
   },
   "devDependencies": {
     "typescript": "^5.5.4",

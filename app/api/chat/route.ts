@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { waitUntil } from "@vercel/functions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -184,8 +185,16 @@ export async function POST(req: NextRequest) {
           flush() {
             // Akış tamamen bittiğinde, eğer bir asistan cevabı birikmişse ve kullanıcı mesajı varsa
             // arka planda (kullanıcıyı hiç bekletmeden, fire-and-forget) hafıza kaydı isteği atıyoruz.
+            //
+            // ÖNEMLİ: Vercel'in serverless fonksiyonları, HTTP yanıtı istemciye tamamen gönderildikten
+            // hemen sonra çalışma ortamını dondurabilir/kapatabilir. Bu yüzden burada çağrıyı sadece
+            // "await'siz" (fire-and-forget) bırakmak yeterli DEĞİLDİR — çağrı hiç tamamlanmadan
+            // fonksiyon süreci sonlandırılabilir. `waitUntil()` bu isteğin arka planda gerçekten
+            // bitmesini bekleyecek şekilde fonksiyonun ömrünü uzatır.
             if (latestUserMessage && fullAssistantText.trim().length > 0) {
-              saveToMemoryFireAndForget(latestUserMessage, fullAssistantText, memoryServiceUrl);
+              waitUntil(
+                saveToMemoryFireAndForget(latestUserMessage, fullAssistantText, memoryServiceUrl)
+              );
             }
           }
         });
