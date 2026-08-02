@@ -230,6 +230,34 @@ async def search_memory(request: SearchRequest):
         # Arama hatası ana sohbet akışını çökertmesin diye boş sonuç dönüyoruz
         return SearchResponse(results=[], found=False)
 
+# Bu kelimelerle başlayan/çok kısa mesajlar neredeyse hiçbir zaman hafızaya değer
+# bir bilgi içermez (selamlaşma, teşekkür, kısa onay vb.). Bunları LLM'e hiç
+# sormadan eleyerek modelin gereksiz yere meşgul olmasını (ve bu yüzden gerçek
+# sohbet mesajlarının sırada beklemesini) önlüyoruz.
+TRIVIAL_MESSAGE_PATTERNS = [
+    "merhaba", "selam", "naber", "nasılsın", "iyi misin", "günaydın", "iyi akşamlar",
+    "iyi geceler", "teşekkür", "sağol", "tamam", "ok", "evet", "hayır", "peki",
+    "görüşürüz", "hoşça kal", "kimsin", "ne yapıyorsun"
+]
+MIN_MEANINGFUL_LENGTH = 25  # karakter cinsinden - bundan kısa mesajlar genelde önemsiz sohbettir
+
+
+def is_likely_trivial(user_message: str) -> bool:
+    """
+    Ucuz, hızlı bir ön filtre: mesaj kısa VEYA tipik bir selamlaşma/kısa yanıt kalıbıyla
+    başlıyorsa, muhtemelen hafızaya değer bir bilgi taşımıyordur. Bu durumda pahalı LLM
+    çağrısını hiç yapmayarak hem hız kazanıyoruz hem de modelin gerçek sohbet istekleriyle
+    çakışmasını (kaynak çekişmesi/kuyruklanma) azaltıyoruz.
+    """
+    text = user_message.strip().lower()
+    if len(text) < MIN_MEANINGFUL_LENGTH:
+        return True
+    for pattern in TRIVIAL_MESSAGE_PATTERNS:
+        if text.startswith(pattern):
+            return True
+    return False
+
+
 @app.post("/remember", response_model=RememberResponse)
 async def remember_conversation(request: RememberRequest):
     """
@@ -238,6 +266,12 @@ async def remember_conversation(request: RememberRequest):
     """
     if not embedding_model or not qdrant_client:
         return RememberResponse(saved=False, reason="Sistem bileşenleri (Qdrant/Embedding) hazır değil.")
+
+    # ÖN FİLTRE: Mesaj açıkça önemsizse, LLM'i hiç meşgul etmeden erken çıkış yapıyoruz.
+    # Bu, ana sohbet akışının modelle kaynak çekişmesine girme ihtimalini büyük ölçüde azaltır.
+    if is_likely_trivial(request.user_message):
+        logger.info(f"Ön filtre: Mesaj önemsiz görünüyor, LLM'e sorulmadan atlandı: '{request.user_message[:40]}...'")
+        return RememberResponse(saved=False, reason="Mesaj kısa/sıradan bir sohbet olduğu için LLM'e sorulmadan atlandı.")
 
     try:
         # 1. LLM'e karar verdirmek için prompt hazırlıyoruz
@@ -270,7 +304,7 @@ async def remember_conversation(request: RememberRequest):
                         {"role": "user", "content": decision_prompt}
                     ],
                     "temperature": 0.1, # Kararlılık için düşük sıcaklık
-                    "max_tokens": 150,
+                    "max_tokens": 80, # Sadece EVET/HAYIR + kısa bir özet yeterli; CPU'da üretim süresini kısaltmak için düşük tutuyoruz
                     "stream": False
                 }
             )
