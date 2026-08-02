@@ -10,6 +10,7 @@ Next.js tabanlı, Oracle Cloud üzerinde çalışan Qwen2.5-14B (llama.cpp serve
    - Vercel'in HTTPS (güvenli) sayfası üzerinden HTTP (güvensiz) bir IP adresine istek atarken tarayıcıların uyguladığı **Mixed Content** (Karışık İçerik) engelini tamamen aşar.
    - OpenAI-uyumlu streaming (akış) desteğini doğrudan tarayıcıya iletir.
 3. **Yerel Depolama (localStorage):** Sohbet geçmişiniz tamamen tarayıcınızın `localStorage` alanında saklanır. Ağır bir veritabanı kurulumu gerektirmez, verileriniz cihazınızda kalır.
+4. **RAG & Akıllı Hafıza (opsiyonel, `../cyber-memory-service`):** Oracle sunucunuzda ayrıca çalışan bir hafıza/arama servisi varsa, proxy her soru öncesi bu servise danışıp geçmişte kaydedilmiş alakalı bilgileri bulur ve modele ekler; cevap bittikten sonra da arka planda konuşmayı analiz ettirip önemli bilgileri otomatik olarak hafızaya kaydeder. Bu servis kapalıysa veya yanıt vermiyorsa sohbet normal şekilde (RAG'siz) çalışmaya devam eder — asla sohbeti bloklamaz.
 
 ## Yerel Geliştirme (Local Development)
 
@@ -32,6 +33,9 @@ Projede kullanılan tek bir opsiyonel ortam değişkeni vardır:
 - `LLAMA_SERVER_URL`: Oracle Cloud üzerinde çalışan llama.cpp sunucunuzun adresi.
   - *Varsayılan Değer:* `http://79.76.63.191:8082` (Belirtilmezse otomatik olarak bu IP kullanılır).
   - Sunucu adresiniz veya portunuz değişirse, kodu güncellemek yerine Vercel panelinden bu değişkeni yeni adresle güncellemeniz yeterlidir.
+- `MEMORY_SERVICE_URL`: Oracle sunucunuzdaki RAG/hafıza mikroservisinin adresi (bkz. `../cyber-memory-service`).
+  - *Varsayılan Değer:* `http://79.76.63.191:8083`.
+  - Bu servis yoksa veya kapalıysa hiçbir şey bozulmaz, sohbet RAG'siz devam eder.
 
 ## Vercel'e Deploy Etme
 

@@ -4,7 +4,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Cyber AI - Server-Side Proxy API Route
+ * Cyber AI - Server-Side Proxy API Route (RAG & Akıllı Hafıza Entegrasyonlu)
  * 
  * Neden bu proxy'yi kullanıyoruz?
  * 1. GÜVENLİK: Tarayıcı konsolunda veya ağ isteklerinde Oracle sunucunuzun IP adresi (79.76.63.191) görünmez.
@@ -13,9 +13,13 @@ export const dynamic = "force-dynamic";
  *    çalıştığı için bu engeli tamamen aşar.
  * 3. ESNEKLİK: Sunucu adresi veya portu değişirse, kodu değiştirmeden Vercel panelinden LLAMA_SERVER_URL
  *    çevre değişkenini (Environment Variable) güncellemeniz yeterlidir.
+ * 4. RAG & HAFIZA: Kullanıcı mesajı geldiğinde önce arka planda hafıza araması (RAG) yapılır, alakalı geçmiş bilgiler
+ *    sistem mesajına eklenir. Cevap tamamlandığında ise arka planda (kullanıcıyı bekletmeden) konuşma analiz edilip
+ *    önemli bilgiler otomatik olarak hafızaya (Qdrant) kaydedilir.
  */
 
 const DEFAULT_UPSTREAM_URL = "http://79.76.63.191:8082";
+const DEFAULT_MEMORY_SERVICE_URL = "http://79.76.63.191:8083";
 
 export async function POST(req: NextRequest) {
   try {
@@ -38,42 +42,92 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 2. Upstream sunucu adresini belirle (Vercel env var veya varsayılan IP)
+    // 2. Çevre değişkenlerini oku veya varsayılan adresleri kullan
     const upstreamBaseUrl = process.env.LLAMA_SERVER_URL || DEFAULT_UPSTREAM_URL;
     const upstreamEndpoint = `${upstreamBaseUrl}/v1/chat/completions`;
+    const memoryServiceUrl = process.env.MEMORY_SERVICE_URL || DEFAULT_MEMORY_SERVICE_URL;
 
-    // 3. 60 saniyelik bir bağlantı zaman aşımı (timeout) tanımla
+    // 3. En son kullanıcı mesajını bul (RAG araması ve hafıza kaydı için kullanılacak)
+    let latestUserMessage: string | null = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "user") {
+        latestUserMessage = messages[i].content;
+        break;
+      }
+    }
+
+    // 4. ADIM A: RAG (Geçmiş Hafıza) Araması
+    // Kullanıcıyı bekletmemek için bu aramaya maksimum 4 saniyelik bir zaman aşımı (timeout) koyuyoruz.
+    // Eğer hafıza servisi kapalıysa veya yavaşsa, RAG adımı sessizce atlanır ve sohbet normal şekilde devam eder.
+    let ragContext: string | null = null;
+    if (latestUserMessage) {
+      const ragController = new AbortController();
+      const ragTimeoutId = setTimeout(() => ragController.abort(), 4000);
+
+      try {
+        const ragResponse = await fetch(`${memoryServiceUrl}/search`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: latestUserMessage, top_k: 4 }),
+          signal: ragController.signal,
+        });
+
+        clearTimeout(ragTimeoutId);
+
+        if (ragResponse.ok) {
+          const ragData = await ragResponse.json();
+          if (ragData.found && ragData.results && ragData.results.length > 0) {
+            const memories = ragData.results.map((r: any) => `- ${r.text}`).join("\n");
+            ragContext = `Aşağıda geçmiş konuşmalardan hatırlanan, bu soruyla alakalı olabilecek bilgiler var. Eğer alakalıysa kullan, değilse görmezden gel:\n${memories}`;
+            console.log("RAG Bağlamı başarıyla enjekte edildi.");
+          }
+        } else {
+          console.warn(`Hafıza servisi hata döndürdü: ${ragResponse.status}`);
+        }
+      } catch (ragError: any) {
+        clearTimeout(ragTimeoutId);
+        console.warn("Hafıza araması (RAG) adımı atlandı veya zaman aşımına uğradı:", ragError.message || ragError);
+      }
+    }
+
+    // 5. ADIM B: Sistem Mesajlarını Hazırla
+    // Cyber AI kimliğini tanımlayan ana sistem mesajı
+    const identitySystemMessage = {
+      role: "system",
+      content: "Sen Cyber AI'sın (veya kısaca Cyber). Oracle Cloud üzerinde çalışan, yüksek performanslı ve özel bir yapay zeka asistanısın. Kim olduğun sorulduğunda asla 'Qwen' veya 'Alibaba' olduğunu söyleme; kendini her zaman 'Cyber AI' olarak tanıt. Türkçe konuş."
+    };
+
+    // Mesaj listesini oluşturuyoruz: [Kimlik Sistem Mesajı, RAG Sistem Mesajı (varsa), ...Kullanıcı Mesajları]
+    const formattedMessages = [identitySystemMessage];
+    if (ragContext) {
+      formattedMessages.push({
+        role: "system",
+        content: ragContext
+      });
+    }
+    formattedMessages.push(...messages);
+
+    // 6. ADIM C: llama.cpp Sunucusuna İstek Gönder
+    // Bağlantı için 120 saniyelik zaman aşımı tanımlıyoruz.
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
 
     try {
-      // 4. Sistem Mesajı (Cyber AI Kimliği) ve İstek Yönlendirme
-      const systemMessage = {
-        role: "system",
-        content:
-          "Sen Cyber AI'sın (veya kısaca Cyber). Oracle Cloud üzerinde çalışan, yüksek performanslı ve özel bir yapay zeka asistanısın. Kim olduğun sorulduğunda asla 'Qwen' veya 'Alibaba' olduğunu söyleme; kendini her zaman 'Cyber AI' olarak tanıt. Türkçe konuş.",
-      };
-
-      // Kullanıcı mesajlarının en başına sistem mesajını enjekte ediyoruz
-      const formattedMessages = [systemMessage, ...messages];
-
-      // Oracle sunucusundaki llama.cpp API'sine isteği yönlendir
       const upstreamResponse = await fetch(upstreamEndpoint, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "models/qwen2.5-14b.gguf", // Sunucumuzdaki gerçek model id'si ile eşleştiriyoruz (GET /v1/models çıktısına göre)
+          model: "models/qwen2.5-14b.gguf",
           messages: formattedMessages,
-          stream: true, // Akış (streaming) modunu etkinleştiriyoruz
+          stream: true,
           temperature: 0.7,
-          max_tokens: 2048,
+          max_tokens: 8192,
         }),
         signal: controller.signal,
       });
 
-      // 5. Upstream hata durumlarını yönet
+      clearTimeout(timeoutId);
+
       if (!upstreamResponse.ok) {
         let errorText = "";
         try {
@@ -90,9 +144,56 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      // 6. Başarılı akış (stream) yanıtını doğrudan istemciye (tarayıcıya) yönlendir
+      // 7. ADIM D: Akış (Stream) Yanıtını İlet ve Arka Planda Hafızaya Kaydet
+      // Tarayıcıya veriyi gecikmesiz (real-time) iletirken, aynı zamanda asistanın ürettiği tüm cevabı
+      // arka planda biriktiriyoruz. Akış bittiğinde bu cevabı hafıza servisine gönderip analiz ettireceğiz.
       if (upstreamResponse.body) {
-        return new Response(upstreamResponse.body, {
+        const encoder = new TextEncoder();
+        const decoder = new TextDecoder();
+        let fullAssistantText = "";
+        let sseBuffer = "";
+
+        const transformStream = new TransformStream({
+          transform(chunk, controller) {
+            // Gelen veriyi hiç bekletmeden doğrudan tarayıcıya (istemciye) yönlendiriyoruz
+            controller.enqueue(chunk);
+
+            // Aynı zamanda arka planda metni biriktirmek için çözümlüyoruz
+            const text = decoder.decode(chunk, { stream: true });
+            sseBuffer += text;
+            const lines = sseBuffer.split("\n");
+            sseBuffer = lines.pop() || ""; // Tamamlanmamış son satırı bir sonraki chunk için sakla
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (trimmed.startsWith("data: ")) {
+                const dataStr = trimmed.slice(6);
+                if (dataStr === "[DONE]") continue;
+                try {
+                  const parsed = JSON.parse(dataStr);
+                  const content = parsed.choices?.[0]?.delta?.content || "";
+                  if (content) {
+                    fullAssistantText += content;
+                  }
+                } catch (_) {
+                  // Kısmi veya bozuk JSON satırlarını yoksay
+                }
+              }
+            }
+          },
+          flush() {
+            // Akış tamamen bittiğinde, eğer bir asistan cevabı birikmişse ve kullanıcı mesajı varsa
+            // arka planda (kullanıcıyı hiç bekletmeden, fire-and-forget) hafıza kaydı isteği atıyoruz.
+            if (latestUserMessage && fullAssistantText.trim().length > 0) {
+              saveToMemoryFireAndForget(latestUserMessage, fullAssistantText, memoryServiceUrl);
+            }
+          }
+        });
+
+        // Upstream akışını transform süzgecinden geçirip istemciye dönüyoruz
+        const transformedReadable = upstreamResponse.body.pipeThrough(transformStream);
+
+        return new Response(transformedReadable, {
           status: 200,
           headers: {
             "Content-Type": "text/event-stream",
@@ -110,13 +211,12 @@ export async function POST(req: NextRequest) {
     } catch (fetchError: any) {
       clearTimeout(timeoutId);
       
-      // Zaman aşımı veya ağ hatası durumunu yakala
       const isTimeout = fetchError.name === "AbortError";
       return NextResponse.json(
         {
           error: "UPSTREAM_UNREACHABLE",
           message: isTimeout 
-            ? "Oracle sunucusuna bağlanırken zaman aşımı oluştu (60s)." 
+            ? "Oracle sunucusuna bağlanırken zaman aşımı oluştu (120s)." 
             : "Oracle sunucusuna (79.76.63.191:8082) ulaşılamadı. Sunucu kapalı olabilir, port kapalı olabilir veya güvenlik duvarı engelliyor olabilir.",
           details: fetchError.message || String(fetchError),
         },
@@ -129,5 +229,44 @@ export async function POST(req: NextRequest) {
       { error: "INTERNAL_SERVER_ERROR", message: "Sunucu tarafında beklenmeyen bir hata oluştu.", details: globalError.message },
       { status: 500 }
     );
+  }
+}
+
+/**
+ * Arka Planda Hafıza Kaydı Yapan Yardımcı Fonksiyon (Fire-and-Forget)
+ * Bu fonksiyon çağrıldığında ana akış (POST) sonlanır ve tarayıcı cevabı almaya devam eder.
+ * Bu işlem tamamen arka planda, kullanıcıyı bekletmeden çalışır.
+ */
+async function saveToMemoryFireAndForget(userMessage: string, assistantMessage: string, memoryServiceUrl: string) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 20000); // Hafıza analizi için 20 saniye süre tanıyoruz
+
+  try {
+    console.log("Arka planda hafıza analizi başlatılıyor...");
+    const response = await fetch(`${memoryServiceUrl}/remember`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_message: userMessage,
+        assistant_message: assistantMessage
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (response.ok) {
+      const data = await response.json();
+      if (data.saved) {
+        console.log(`[Hafıza Kaydedildi] Özet: "${data.saved_text}"`);
+      } else {
+        console.log(`[Hafıza Atlandı] Gerekçe: ${data.reason}`);
+      }
+    } else {
+      console.error(`Hafıza kaydı servisi hata döndürdü: ${response.status}`);
+    }
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+    console.error("Arka planda hafıza kaydı yapılırken hata oluştu:", error.message || error);
   }
 }

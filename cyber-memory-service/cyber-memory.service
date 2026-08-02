@@ -1,0 +1,32 @@
+# Kurulum Notu: Bu dosyayi /etc/systemd/system/cyber-memory.service konumuna kopyalayin.
+# Ardindan su komutlari calistirin:
+# sudo systemctl daemon-reload
+# sudo systemctl enable --now cyber-memory
+# Durumunu kontrol etmek icin: sudo systemctl status cyber-memory
+# Loglari izlemek icin: journalctl -u cyber-memory -f
+
+[Unit]
+Description=Cyber AI Memory and Search Service (RAG)
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+# NOT: Kullanici adiniz 'ubuntu' degilse (whoami komutuyla kontrol edin), 
+# asagidaki User ve WorkingDirectory yollarini kendi kullanici adinizla degistirin.
+User=ubuntu
+WorkingDirectory=/home/ubuntu/cyber-memory-service
+ExecStart=/usr/bin/python3 /home/ubuntu/cyber-memory-service/main.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Cevre Degiskenleri
+Environment=QDRANT_HOST=localhost
+Environment=QDRANT_PORT=6333
+Environment=QDRANT_COLLECTION=cyber_memory
+Environment=LLAMA_SERVER_URL=http://localhost:8082
+
+[Install]
+WantedBy=multi-user.target

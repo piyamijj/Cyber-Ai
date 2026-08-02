@@ -1,0 +1,304 @@
+import os
+import logging
+import datetime
+import uuid
+from typing import List, Optional
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import uvicorn
+import httpx
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qmodels
+from sentence_transformers import SentenceTransformer
+
+# 1. LOGGING AYARLARI
+# Servisin çalışmasını ve arka plandaki kararları takip edebilmek için loglama yapısını kuruyoruz.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("cyber-memory-service")
+
+# 2. YAPILANDIRMA VE ÇEVRE DEĞİŞKENLERİ
+# Oracle sunucusundaki diğer servislerin adreslerini ve Qdrant ayarlarını tanımlıyoruz.
+QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
+QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "cyber_memory")
+LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://localhost:8082")
+EMBEDDING_MODEL_NAME = "BAAI/bge-base-en-v1.5"
+
+# Arama için varsayılan parametreler
+SEARCH_TOP_K = int(os.getenv("SEARCH_TOP_K", "5"))
+# Cosine similarity için eşik değer. Alakasız geçmiş bilgileri elemek için kullanılır.
+SEARCH_SCORE_THRESHOLD = float(os.getenv("SEARCH_SCORE_THRESHOLD", "0.45"))
+
+# 3. GLOBAL MODEL VE İSTEMCİ BAŞLATMALARI
+# Servis her istekte modeli baştan yüklemesin diye global olarak bir kez başlatıyoruz.
+logger.info(f"Embedding modeli yükleniyor: {EMBEDDING_MODEL_NAME}...")
+try:
+    embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    logger.info("Embedding modeli başarıyla yüklendi.")
+except Exception as e:
+    logger.error(f"Embedding modeli yüklenirken hata oluştu: {e}")
+    embedding_model = None
+
+logger.info(f"Qdrant istemcisi başlatılıyor ({QDRANT_HOST}:{QDRANT_PORT})...")
+try:
+    qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    logger.info("Qdrant istemcisi başarıyla başlatıldı.")
+except Exception as e:
+    logger.error(f"Qdrant bağlantısı kurulurken hata oluştu: {e}")
+    qdrant_client = None
+
+# 4. FASTAPI UYGULAMASI VE CORS AYARLARI
+app = FastAPI(
+    title="Cyber AI Memory & Search Service",
+    description="Cyber AI için RAG arama ve akıllı otomatik hafıza kaydı mikroservisi.",
+    version="1.0.0"
+)
+
+# Bu servis sadece sunucu tarafında (Vercel proxy backend) çağrılacağı için CORS kısıtlamalarını esnek tutuyoruz.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 5. PYDANTIC VERİ MODELLERİ
+class SearchRequest(BaseModel):
+    query: str
+    top_k: Optional[int] = None
+
+class SearchResult(BaseModel):
+    text: str
+    score: float
+    timestamp: Optional[str] = None
+
+class SearchResponse(BaseModel):
+    results: List[SearchResult]
+    found: bool
+
+class RememberRequest(BaseModel):
+    user_message: str
+    assistant_message: str
+
+class RememberResponse(BaseModel):
+    saved: bool
+    reason: str
+    saved_text: Optional[str] = None
+
+class HealthResponse(BaseModel):
+    status: str
+    qdrant_connected: bool
+    collection_exists: bool
+    embedding_model_loaded: bool
+    collection_points_count: Optional[int] = None
+
+# 6. BAŞLANGIÇ KONTROLLERİ
+@app.on_event("startup")
+async def startup_event():
+    """Servis başlarken Qdrant koleksiyonunun varlığını doğrular."""
+    if qdrant_client:
+        try:
+            collections = qdrant_client.get_collections()
+            exists = any(c.name == COLLECTION_NAME for c in collections.collections)
+            if exists:
+                logger.info(f"Doğrulandı: '{COLLECTION_NAME}' koleksiyonu Qdrant üzerinde mevcut.")
+            else:
+                logger.warning(
+                    f"DİKKAT: '{COLLECTION_NAME}' koleksiyonu Qdrant üzerinde bulunamadı! "
+                    "Lütfen koleksiyonun doğru oluşturulduğundan emin olun."
+                )
+        except Exception as e:
+            logger.error(f"Başlangıçta Qdrant koleksiyon kontrolü başarısız oldu: {e}")
+
+# 7. ENDPOINT'LER
+
+@app.get("/health", response_model=HealthResponse)
+async def health_check():
+    """Servisin ve bağlı olduğu bileşenlerin (Qdrant, Embedding) sağlık durumunu döner."""
+    qdrant_connected = False
+    collection_exists = False
+    points_count = None
+    embedding_loaded = embedding_model is not None
+
+    if qdrant_client:
+        try:
+            collections = qdrant_client.get_collections()
+            qdrant_connected = True
+            collection_exists = any(c.name == COLLECTION_NAME for c in collections.collections)
+            
+            if collection_exists:
+                # Koleksiyondaki toplam kayıt sayısını alıyoruz
+                collection_info = qdrant_client.get_collection(collection_name=COLLECTION_NAME)
+                points_count = collection_info.points_count
+        except Exception as e:
+            logger.error(f"Sağlık kontrolü sırasında Qdrant hatası: {e}")
+
+    status = "ok" if (qdrant_connected and collection_exists and embedding_loaded) else "degraded"
+
+    return HealthResponse(
+        status=status,
+        qdrant_connected=qdrant_connected,
+        collection_exists=collection_exists,
+        embedding_model_loaded=embedding_loaded,
+        collection_points_count=points_count
+    )
+
+@app.post("/search", response_model=SearchResponse)
+async def search_memory(request: SearchRequest):
+    """
+    Kullanıcının sorusuna göre Qdrant üzerinde anlamsal (vektörel) arama yapar.
+    BGE-v1.5 modelinin önerisi doğrultusunda arama sorgusuna özel ön ek eklenir.
+    """
+    if not embedding_model:
+        logger.error("Arama başarısız: Embedding modeli yüklü değil.")
+        return SearchResponse(results=[], found=False)
+    
+    if not qdrant_client:
+        logger.error("Arama başarısız: Qdrant istemcisi başlatılmamış.")
+        return SearchResponse(results=[], found=False)
+
+    try:
+        # BAAI/bge-base-en-v1.5 için en iyi arama performansı için sorgu ön eki ekliyoruz
+        query_text = f"Represent this sentence for searching relevant passages: {request.query}"
+        
+        # Sorguyu vektöre çeviriyoruz
+        query_vector = embedding_model.encode(query_text).tolist()
+        
+        limit = request.top_k or SEARCH_TOP_K
+
+        # Qdrant üzerinde vektörel arama yapıyoruz
+        search_results = qdrant_client.search(
+            collection_name=COLLECTION_NAME,
+            query_vector=query_vector,
+            limit=limit,
+            score_threshold=SEARCH_SCORE_THRESHOLD
+        )
+
+        results = []
+        for hit in search_results:
+            payload = hit.payload or {}
+            results.append(SearchResult(
+                text=payload.get("text", ""),
+                score=hit.score,
+                timestamp=payload.get("timestamp")
+            ))
+
+        found = len(results) > 0
+        logger.info(
+            f"Hafıza araması tamamlandı. Sorgu: '{request.query[:30]}...' "
+            f"| Bulunan kayıt sayısı: {len(results)} | En yüksek skor: {results[0].score if found else 'Yok'}"
+        )
+        
+        return SearchResponse(results=results, found=found)
+
+    except Exception as e:
+        logger.error(f"Hafıza araması sırasında beklenmeyen hata: {e}", exc_info=True)
+        # Arama hatası ana sohbet akışını çökertmesin diye boş sonuç dönüyoruz
+        return SearchResponse(results=[], found=False)
+
+@app.post("/remember", response_model=RememberResponse)
+async def remember_conversation(request: RememberRequest):
+    """
+    Konuşmayı analiz eder, LLM'e danışarak hafızaya değer bir bilgi olup olmadığına karar verir.
+    Eğer önemli bir bilgi ise özetleyip Qdrant'a kaydeder.
+    """
+    if not embedding_model or not qdrant_client:
+        return RememberResponse(saved=False, reason="Sistem bileşenleri (Qdrant/Embedding) hazır değil.")
+
+    try:
+        # 1. LLM'e karar verdirmek için prompt hazırlıyoruz
+        decision_prompt = (
+            "Aşağıdaki kullanıcı ve asistan arasındaki son konuşmayı analiz et.\n"
+            "Bu konuşma, kullanıcının gelecekte hatırlanmasını isteyeceği önemli bir kişisel bilgisini, "
+            "tercihini, kalıcı bir gerçeği veya özel bir talimatını içeriyor mu?\n"
+            "Sıradan sohbetleri, selamlaşmaları, geçici soruları veya genel bilgi aramalarını (kod yazma, genel tarih vb.) hafızaya KAYDETME.\n\n"
+            "Konuşma:\n"
+            f"Kullanıcı: {request.user_message}\n"
+            f"Asistan: {request.assistant_message}\n\n"
+            "YALNIZCA aşağıdaki formatta cevap ver, başka hiçbir şey yazma:\n"
+            "1. Satır: Eğer kaydedilmeye değer kalıcı bir bilgi varsa 'EVET', yoksa 'HAYIR'\n"
+            "2. Satır: (Sadece EVET ise) Bu bilginin gelecekte arandığında bulunabilmesi için 1-2 cümlelik net, "
+            "üçüncü şahıs ağzından yazılmış Türkçe bir özet cümlesi (Örn: 'Kullanıcı Python dilini tercih ediyor ve web projeleri geliştiriyor.').\n"
+        )
+
+        # 2. llama.cpp sunucusuna kısa bir istek atıyoruz
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            response = await client.post(
+                f"{LLAMA_SERVER_URL}/v1/chat/completions",
+                json={
+                    "model": "models/qwen2.5-14b.gguf",
+                    "messages": [
+                        {"role": "system", "content": "Sen sadece verilen formata göre çıktı üreten kararlı bir analizörsün."},
+                        {"role": "user", "content": decision_prompt}
+                    ],
+                    "temperature": 0.1, # Kararlılık için düşük sıcaklık
+                    "max_tokens": 150,
+                    "stream": False
+                }
+            )
+
+        if response.status_code != 200:
+            logger.error(f"Hafıza kararı için LLM çağrısı başarısız oldu. Durum kodu: {response.status_code}")
+            return RememberResponse(saved=False, reason=f"LLM sunucusu hata döndürdü: {response.status_code}")
+
+        llm_output = response.json()["choices"][0]["message"]["content"].strip()
+        logger.info(f"LLM Hafıza Analiz Çıktısı:\n{llm_output}")
+
+        # 3. LLM çıktısını ayrıştırıyoruz
+        lines = [line.strip() for line in llm_output.split("\n") if line.strip()]
+        if not lines:
+            return RememberResponse(saved=False, reason="LLM boş yanıt döndürdü.")
+
+        decision = lines[0].upper()
+        
+        if "EVET" in decision:
+            if len(lines) < 2:
+                return RememberResponse(saved=False, reason="LLM 'EVET' dedi ancak özet cümlesi üretmedi.")
+            
+            summary_text = " ".join(lines[1:])
+            
+            # 4. Özet cümlesini vektöre çevirip Qdrant'a kaydediyoruz
+            # Kayıt (passage) vektörleri için ön ek EKLEMİYORUZ, doğrudan ham metni embed ediyoruz
+            vector = embedding_model.encode(summary_text).tolist()
+            
+            point_id = str(uuid.uuid4())
+            timestamp_str = datetime.datetime.utcnow().isoformat() + "Z"
+
+            qdrant_client.upsert(
+                collection_name=COLLECTION_NAME,
+                points=[
+                    qmodels.PointStruct(
+                        id=point_id,
+                        vector=vector,
+                        payload={
+                            "text": summary_text,
+                            "timestamp": timestamp_str,
+                            "source": "auto_memory",
+                            "raw_user_msg": request.user_message[:200],
+                            "raw_assistant_msg": request.assistant_message[:200]
+                        }
+                    )
+                ]
+            )
+
+            logger.info(f"YENİ HAFIZA KAYDEDİLDİ: '{summary_text}' | ID: {point_id}")
+            return RememberResponse(saved=True, reason="Önemli bilgi tespit edildi ve hafızaya kaydedildi.", saved_text=summary_text)
+        
+        else:
+            logger.info("Konuşma hafızaya değer bir bilgi içermediği için kaydedilmedi.")
+            return RememberResponse(saved=False, reason="Konuşma hafızaya değer kalıcı bir bilgi içermiyor.")
+
+    except Exception as e:
+        logger.error(f"Hafıza kaydı işlemi sırasında hata: {e}", exc_info=True)
+        return RememberResponse(saved=False, reason=f"Sistem hatası: {str(e)}")
+
+# 8. DOĞRUDAN ÇALIŞTIRMA DESTEĞİ
+if __name__ == "__main__":
+    logger.info("Cyber AI Hafıza Servisi port 8083 üzerinde başlatılıyor...")
+    uvicorn.run(app, host="0.0.0.0", port=8083)
