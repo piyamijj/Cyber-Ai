@@ -256,7 +256,11 @@ async def remember_conversation(request: RememberRequest):
         )
 
         # 2. llama.cpp sunucusuna kısa bir istek atıyoruz
-        async with httpx.AsyncClient(timeout=25.0) as client:
+        # NOT: 14B model CPU üzerinde çalıştığı için, kısa bir karar isteği bile
+        # bazen 1-2 dakikaya kadar sürebilir (daha önceki testlerde gözlemlendi).
+        # Bu yüzden zaman aşımını cömert tutuyoruz (connect kısa, read uzun).
+        request_timeout = httpx.Timeout(connect=10.0, read=150.0, write=10.0, pool=10.0)
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
             response = await client.post(
                 f"{LLAMA_SERVER_URL}/v1/chat/completions",
                 json={

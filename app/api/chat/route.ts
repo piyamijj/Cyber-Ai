@@ -3,6 +3,10 @@ import { waitUntil } from "@vercel/functions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// Ana sohbet cevabı (120s) + arka planda hafıza kararı için LLM çağrısı (14B model CPU'da
+// yavaş olabileceğinden ~150s'ye kadar sürebilir) toplamda fonksiyonun canlı kalması gereken
+// süreyi aşabilir. Bu yüzden fonksiyonun maksimum çalışma süresini güvenli bir şekilde artırıyoruz.
+export const maxDuration = 290;
 
 /**
  * Cyber AI - Server-Side Proxy API Route (RAG & Akıllı Hafıza Entegrasyonlu)
@@ -248,7 +252,9 @@ export async function POST(req: NextRequest) {
  */
 async function saveToMemoryFireAndForget(userMessage: string, assistantMessage: string, memoryServiceUrl: string) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 20000); // Hafıza analizi için 20 saniye süre tanıyoruz
+  // Hafıza servisi, kaydetmeye değip değmediğine karar vermek için 14B modele (CPU üzerinde,
+  // yavaş olabilir) ayrı bir istek atıyor. Bu yüzden burada da cömert bir süre tanıyoruz.
+  const timeoutId = setTimeout(() => controller.abort(), 180000);
 
   try {
     console.log("Arka planda hafıza analizi başlatılıyor...");
