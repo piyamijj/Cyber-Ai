@@ -20,22 +20,13 @@
 #   (public internetten erişim yüzeyi azalır). Adım 0'da bunu kontrol edeceğiz.
 # =====================================================================================
 
-## ADIM 0: AYNI VCN İÇİNDE OLUP OLMADIĞINIZI KONTROL EDİN (ÖNCELİKLE YAPIN)
+## ADIM 0: PRIVATE IP KULLANIMI (VCN DOĞRULANDI — TEK ADIMLIK KURULUM)
 
-Docker kurulumuna başlamadan önce, iki sunucunun aynı Virtual Cloud Network (VCN) içinde olup olmadığını kontrol edin — bu, aşağıdaki adımlarda PUBLIC IP mi PRIVATE IP mi kullanacağınızı belirler.
+**Oracle Cloud konsolundan KESİN olarak doğrulandı:** Sunucu 1 (79.76.63.191) ve Sunucu 2 (79.76.38.185) **AYNI "cyber" adlı VCN içinde**, ikisi de `eu-stockholm-1` region'ında, aynı Availability Domain (AD-1) ve Fault Domain'de (FD-3). Bu, private IP üzerinden doğrudan dahili ağ (internal network) haberleşmesinin **kesin olarak mümkün** olduğu anlamına gelir — public internete hiç çıkmadan, daha hızlı ve daha güvenli.
 
-1. **Oracle Cloud Console**'a giriş yapın.
-2. **Compute > Instances** bölümüne gidin, Sunucu 2'nizin (instance-20260804-0125) üzerine tıklayın.
-3. **Networking** (Ağ) sekmesine geçin. Burada şunları not edin:
-   - **VCN adı** (örn. "cyber")
-   - **Private IP adresi** (genelde `10.x.x.x` formatında, örn. `10.0.0.15`)
-4. Aynı işlemi Sunucu 1 (79.76.63.191) için de yapın ve VCN adının AYNI olup olmadığını karşılaştırın.
+**Tek adımınız:** Oracle Cloud Console → **Compute → Instances → Sunucu 2 (instance-20260804-0125) → Networking sekmesi**'nden Sunucu 2'nin **Private IP** adresini (genelde `10.x.x.x` formatında) alın, ve bu rehberdeki `.env` dosyanızda (`.env.example`'dan kopyaladığınız) `SERVER2_PRIVATE_IP` değişkenine yazıp `SERVER2_IP` değerini o private IP ile değiştirin. Aynı şekilde `cyber-memory-service/cyber-memory.service` dosyasındaki yorumlu (`#` ile başlayan) private IP satırlarını aktif hale getirip public IP satırlarını yorum yapın.
 
-**Sonuç değerlendirmesi:**
-- ✅ **VCN adları AYNIYSA** ("cyber" = "cyber"): Aşağıdaki tüm adımlarda `79.76.38.185` (Sunucu 2 public IP) yerine Sunucu 2'nin **private IP**'sini kullanın (`docker-compose.yml` dosyasında port mapping değişmez, ama `cyber-memory.service` içindeki `QDRANT_HOST`/`DRAFT_LLAMA_SERVER_URL` değerlerini ve `SECURITY.md`'deki firewall kurallarını private IP'lerle güncelleyin — her iki dosyada da bunun için hazır, yorum satırı halinde alternatif satırlar bırakıldı).
-- ⚠️ **VCN adları FARKLIYSA**: Public IP (`79.76.38.185`) kullanmaya devam edin, bu rehberdeki varsayılan adımlar zaten bunun için yazıldı — hiçbir ek işlem gerekmez.
-
-**Emin değilseniz veya konsol ekranını bana paylaşmak isterseniz**, private IP adresini ve VCN adını bana iletebilirsiniz — ben yapılandırmayı kesinleştiririm.
+Bu adımı atlarsanız veya private IP'yi bulamazsanız **hiçbir sorun yok** — bu rehberdeki tüm varsayılan adımlar zaten PUBLIC IP (`79.76.38.185`) ile çalışacak şekilde yazıldı, sadece SECURITY.md'deki firewall kurallarını doğru uyguladığınızdan emin olun. Private IP salt bir ek performans/güvenlik iyileştirmesidir, zorunlu değildir.
 
 ## ADIM 1: SUNUCU 2'YE SSH İLE BAĞLANIN
 Kendi yerel terminalinizden (veya Termux ortamınızdan) yeni boş Sunucu 2'ye SSH ile bağlanın:
