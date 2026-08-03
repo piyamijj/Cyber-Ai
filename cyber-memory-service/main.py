@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import html
 import logging
 import datetime
@@ -150,6 +151,7 @@ class DecideRequest(BaseModel):
 
 class DecideResponse(BaseModel):
     needs_realtime_info: bool
+    search_query: str = ""
     raw_output: str
     fallback_used: bool = False
 
@@ -377,85 +379,153 @@ async def web_search(request: WebSearchRequest):
         return WebSearchResponse(results=[], found=False)
 
 
+# "Çırak-usta" karar adımının sistem/rol prompt'u — KULLANICI TARAFINDAN TASARLANDI, birebir
+# kullanılıyor. Küçük model (qwen2.5-0.5b) bu talimatla SADECE geçerli bir JSON objesi üretir:
+# {"search_required": bool, "search_query": str}. search_required=true ise search_query alanı,
+# ham kullanıcı mesajı yerine Tavily'ye gönderilecek OPTİMİZE EDİLMİŞ arama sorgusunu içerir.
+DECIDE_SYSTEM_PROMPT = """# ROL VE GÖREV
+Sen sadece kullanıcının girdisini analiz ederek gerçek zamanlı bir internet araması (Google, Bing vb.) gerekip gerekmediğini tespit eden, yüksek hassasiyetli bir karar mekanizmasısın. Görevin sadece aşağıdaki kurallara göre kurumsal bir JSON çıktısı üretmektir.
+
+# KESİN KURALLAR
+1. Sadece ve sadece geçerli bir JSON objesi döndür.
+2. JSON dışında asla selamlama, açıklama, markdown işareti (```json gibi) veya ek metin ekleme.
+3. Kararsız kaldığın her durumda riske girmemek adına "search_required": true olarak karar ver.
+
+# TETİKLEME KRİTERLERİ
+
+## [search_required = true] Olacak Durumlar (ARAMA GEREKLİ):
+1. ZAMAN DUYARLI: Güncel tarih, saat, yıl, resmi tatiller veya takvimsel durumlar.
+2. FİNANS/HAVA DURUMU: Döviz kurları, borsa verileri, kripto fiyatları, anlık veya haftalık hava tahminleri.
+3. MEDYA VE EĞLENCE: Yeni çıkan, vizyona giren, henüz yayınlanmamış veya devam eden filmler, diziler, yeni sezon tarihleri, müzik albümleri, liste başı şarkılar, kitaplar, ödül törenleri ve magazin haberleri.
+4. GÜNDEM/SPOR: Son dakika haberleri, güncel siyasi olaylar, yeni kabine/başkan kararları, canlı maç skorları, puan durumları ve transfer gelişmeleri.
+5. TEKNOLOJİ/TİCARET: Yazılım kütüphanelerinin en son sürümleri, yeni donanım (GPU/CPU/Telefon) özellikleri ve e-ticaret sitelerindeki anlık ürün fiyat karşılaştırmaları.
+
+## [search_required = false] Olacak Durumlar (ARAMA GEREKSİZ):
+1. SOHBET VE YARATICILIK: "Merhaba", "Nasılsın?", hikaye yazımı, şiir üretimi veya kişisel tavsiye istekleri.
+2. STATİK BİLGİ/KLASİKLER: Matematik formülleri, felsefi teoriler, klasik tarih (Örn: "İstanbul ne zaman fethedildi?"), eski ve tamamlanmış klasik sanat eserlerinin özetleri.
+3. KODLAMA VE DİL: Algoritma mantığı açıklamaları, kod optimizasyonları veya yabancı dil çevirileri.
+
+# ÇIKTI FORMATI
+{
+  "search_required": boolean (true veya false),
+  "search_query": "Arama motoruna yazılacak en optimize, yalın anahtar kelimeler. search_required false ise boş string yani \"\" olmalıdır."
+}
+
+# ÖRNEK SENARYOLAR (FEW-SHOT EXAMPLES)
+
+Girdi: "Dolar bugün ne kadar oldu?"
+Çıktı: {"search_required": true, "search_query": "güncel dolar kuru"}
+
+Girdi: "Bana python ile bir quicksort algoritması yazar mısın?"
+Çıktı: {"search_required": false, "search_query": ""}
+
+Girdi: "House of the Dragon dizisinin 3. sezonu ne zaman çıkacak?"
+Çıktı: {"search_required": true, "search_query": "House of the Dragon 3. sezon yayın tarihi"}
+
+Girdi: "Şu an vizyonda hangi filmler var sinemada?"
+Çıktı: {"search_required": true, "search_query": "vizyondaki filmler"}
+
+Girdi: "Dostoyevski'nin Suç ve Ceza kitabının konusu nedir?"
+Çıktı: {"search_required": false, "search_query": ""}
+
+Girdi: "Geçen haftaki Galatasaray maçının özeti ve golleri kim attı?"
+Çıktı: {"search_required": true, "search_query": "Galatasaray son maç sonucu goller"}"""
+
+
+def _extract_json_object(raw_text: str) -> Optional[dict]:
+    """
+    Küçük modelin döndürdüğü metinden ilk geçerli JSON objesini çıkarmaya çalışır.
+    Modeller bazen talimata rağmen markdown code fence (```json ... ```) veya ekstra
+    boşluk/metin ekleyebilir; bu yüzden doğrudan json.loads yerine önce ham metni,
+    olmazsa metin içindeki ilk {...} bloğunu ayıklayıp parse ediyoruz. İkisi de
+    başarısız olursa None döner (çağıran taraf bunu güvenli taraf sinyali olarak kullanır).
+    """
+    text = raw_text.strip()
+    # 1. Doğrudan parse dene
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # 2. Markdown code fence temizle (```json ... ``` veya ``` ... ```)
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1))
+        except (json.JSONDecodeError, ValueError):
+            pass
+    # 3. Metin içindeki ilk {...} bloğunu regex ile yakala (en dıştaki süslü parantez çifti)
+    brace_match = re.search(r"\{.*\}", text, re.DOTALL)
+    if brace_match:
+        try:
+            return json.loads(brace_match.group(0))
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return None
+
+
 @app.post("/decide", response_model=DecideResponse)
 async def decide_needs_realtime_info(request: DecideRequest):
     """
     'Çırak-usta' mimarisinin karar adımı: kullanıcının sorusunu KÜÇÜK modele (qwen2.5-0.5b,
     ayrı port 8088'de, ana 14B modelden bağımsız çalışır) verip, bu sorunun güncel/harici/
-    gerçek-zamanlı bilgi gerektirip gerektirmediğine SADECE EVET/HAYIR ile karar verdiriyoruz.
+    gerçek-zamanlı bilgi gerektirip gerektirmediğine karar verdiriyoruz. Küçük model AYRI bir
+    süreçte/portta çalıştığı için ana modelle kaynak çekişmesine girmez.
 
-    Bu adım eskiden (route.ts içinde) basit bir anahtar kelime taramasıydı (isLikelyTimeSensitiveQuery)
-    — hem isabetsizdi hem de RAG/web search'ün gereksiz yere çalışıp büyük modele (CPU'da yavaş)
-    ekstra gecikme eklemesine yol açıyordu. Küçük model AYRI bir süreçte/portta çalıştığı için
-    ana modelle kaynak çekişmesine girmez; max_tokens çok düşük tutulduğu için (~5-10) cevap
-    tipik olarak 1-2 saniyede döner.
+    v3 — YAPILANDIRILMIŞ JSON ÇIKTI: Küçük modelden artık düz EVET/HAYIR metni yerine
+    {"search_required": bool, "search_query": str} biçiminde bir JSON isteniyor (prompt
+    kullanıcı tarafından tasarlandı, DECIDE_SYSTEM_PROMPT içinde birebir kullanılıyor).
+    search_required=true olduğunda search_query alanı, ham kullanıcı mesajı yerine Tavily'ye
+    gönderilecek OPTİMİZE EDİLMİŞ arama sorgusunu taşır — böylece web araması hem daha isabetli
+    hem de daha alakalı sonuçlar döndürür.
 
-    Küçük model servisine ulaşılamazsa veya beklenmeyen bir çıktı dönerse, GÜVENLİ TARAFTA
-    kalıyoruz: needs_realtime_info=True döndürüyoruz (yani eskisi gibi RAG+web search çalışsın) —
-    böylece karar mekanizması arızalansa bile en kötü ihtimalle "gereksiz yere biraz gecikme"
-    yaşanır, ama güncel bilgi gerektiren bir soru asla sessizce atlanmaz.
-
-    NOT (v2 — few-shot iyileştirmesi): İlk sürümde prompt açıklama tabanlıydı ve 0.5B model
-    "bugün dolar kuru kaç, güncel durum ne?" gibi AÇIKÇA güncel veri gerektiren bir soruyu bile
-    HAYIR olarak yanlış sınıflandırabiliyordu. Küçük modeller soyut tanımlardan çok somut
-    örneklerden (few-shot) çok daha iyi genelleme yapar; bu yüzden prompt'a net EVET/HAYIR
-    örnekleri eklendi. Ayrıca ikinci bir savunma katmanı olarak, küçük model HAYIR derse bile
-    mesajda güncel/finansal/zamana-duyarlı belirgin anahtar kelimeler varsa karar EVET'e
-    çevriliyor (bkz. aşağıdaki REALTIME_OVERRIDE_KEYWORDS kontrolü) — böylece tek bir küçük
-    modelin kararına tamamen bağımlı kalınmıyor.
+    Güvenlik katmanları (üç kademeli):
+    1. JSON parse başarısız olursa veya "search_required" alanı eksik/geçersizse → güvenli
+       tarafta kal (needs_realtime_info=True), ham kullanıcı mesajını search_query olarak kullan.
+    2. Küçük model servisine hiç ulaşılamazsa (timeout/bağlantı hatası) → aynı şekilde güvenli
+       tarafta kal.
+    3. Küçük model search_required=false derse bile, mesajda güncel/finansal/zamana-duyarlı
+       belirgin anahtar kelimeler (REALTIME_OVERRIDE_KEYWORDS) varsa karar EVET'e zorlanır —
+       tek bir 0.5B modelin kararına tam bağımlı kalınmaz.
     """
-    decision_prompt = (
-        "Bir kullanıcı mesajının GÜNCEL/HARİCİ/GERÇEK-ZAMANLI bilgi (döviz kuru, hava durumu, "
-        "haberler, son dakika, fiyatlar, skorlar, bugünün tarihi/olayları vb.) gerektirip "
-        "gerektirmediğine karar veren bir sınıflandırıcısın. SADECE 'EVET' veya 'HAYIR' yaz.\n\n"
-        "Örnekler:\n"
-        "Mesaj: bugün dolar kuru kaç?\nCevap: EVET\n\n"
-        "Mesaj: bugün hava nasıl olacak?\nCevap: EVET\n\n"
-        "Mesaj: dün haberlerde ne oldu?\nCevap: EVET\n\n"
-        "Mesaj: son dakika deprem oldu mu?\nCevap: EVET\n\n"
-        "Mesaj: bitcoin fiyatı şu an ne kadar?\nCevap: EVET\n\n"
-        "Mesaj: yarın İstanbul'da maç var mı, skor ne olur?\nCevap: EVET\n\n"
-        "Mesaj: sen kimsin?\nCevap: HAYIR\n\n"
-        "Mesaj: python nedir, nasıl öğrenilir?\nCevap: HAYIR\n\n"
-        "Mesaj: merhaba, nasılsın?\nCevap: HAYIR\n\n"
-        "Mesaj: bana bir şiir yazar mısın?\nCevap: HAYIR\n\n"
-        "Mesaj: 2. dünya savaşı ne zaman bitti?\nCevap: HAYIR\n\n"
-        "Mesaj: bir fonksiyonu python'da nasıl tanımlarım?\nCevap: HAYIR\n\n"
-        f"Şimdi bu mesajı sınıflandır:\nMesaj: {request.query}\nCevap:"
-    )
-
     try:
-        request_timeout = httpx.Timeout(connect=3.0, read=8.0, write=3.0, pool=3.0)
+        request_timeout = httpx.Timeout(connect=3.0, read=10.0, write=3.0, pool=3.0)
         async with httpx.AsyncClient(timeout=request_timeout) as client:
             response = await client.post(
                 f"{DRAFT_LLAMA_SERVER_URL}/v1/chat/completions",
                 json={
                     "model": "models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
                     "messages": [
-                        {"role": "system", "content": "Sen sadece EVET veya HAYIR yazan kısa bir sınıflandırıcısın. Örnekleri dikkatlice takip et."},
-                        {"role": "user", "content": decision_prompt}
+                        {"role": "system", "content": DECIDE_SYSTEM_PROMPT},
+                        {"role": "user", "content": request.query}
                     ],
                     "temperature": 0.0,
-                    "max_tokens": 8,
+                    "max_tokens": 120,
                     "stream": False
                 }
             )
 
         if response.status_code != 200:
             logger.warning(f"/decide: Çırak model beklenmeyen durum kodu döndürdü: {response.status_code}. Güvenli taraf: EVET.")
-            return DecideResponse(needs_realtime_info=True, raw_output="", fallback_used=True)
+            return DecideResponse(needs_realtime_info=True, search_query=request.query, raw_output="", fallback_used=True)
 
         raw_output = response.json()["choices"][0]["message"]["content"].strip()
-        normalized = raw_output.upper()
+        parsed = _extract_json_object(raw_output)
 
-        if "HAYIR" in normalized and "EVET" not in normalized:
-            needs_realtime_info = False
-        elif "EVET" in normalized:
-            needs_realtime_info = True
-        else:
-            # Beklenmeyen/çok belirsiz çıktı — güvenli tarafta kal
-            logger.warning(f"/decide: Çırak modelden belirsiz çıktı: '{raw_output}'. Güvenli taraf: EVET.")
-            needs_realtime_info = True
+        if parsed is None or "search_required" not in parsed or not isinstance(parsed.get("search_required"), bool):
+            # JSON parse edilemedi veya beklenen alan/tip yok — güvenli tarafta kal
+            logger.warning(f"/decide: Çırak modelden geçersiz/parse edilemeyen JSON çıktısı: '{raw_output}'. Güvenli taraf: EVET.")
+            return DecideResponse(needs_realtime_info=True, search_query=request.query, raw_output=raw_output, fallback_used=True)
+
+        needs_realtime_info = parsed["search_required"]
+        search_query = parsed.get("search_query") or ""
+        if not isinstance(search_query, str):
+            search_query = ""
+        search_query = search_query.strip()
+
+        # search_required=true ama search_query boşsa (model kuralı tam takip etmemiş olabilir),
+        # ham kullanıcı mesajını arama sorgusu olarak kullan.
+        if needs_realtime_info and not search_query:
+            search_query = request.query
 
         # İKİNCİ SAVUNMA KATMANI: Küçük model HAYIR dedi ama mesajda güncel/zamana-duyarlı
         # bilgiye açıkça işaret eden belirgin anahtar kelimeler varsa, kararı EVET'e çeviriyoruz.
@@ -465,18 +535,24 @@ async def decide_needs_realtime_info(request: DecideRequest):
             text_lower = request.query.lower()
             if any(keyword in text_lower for keyword in REALTIME_OVERRIDE_KEYWORDS):
                 needs_realtime_info = True
+                search_query = request.query
                 override_triggered = True
 
         override_note = " [ANAHTAR KELIME OVERRIDE ILE EVET'E CEVRILDI]" if override_triggered else ""
         logger.info(
-            f"/decide: Sorgu: '{request.query[:50]}...' | Çırak model çıktısı: '{raw_output}' | "
-            f"Karar: {'EVET' if needs_realtime_info else 'HAYIR'}{override_note}"
+            f"/decide: Sorgu: '{request.query[:50]}...' | Çırak model JSON çıktısı: '{raw_output}' | "
+            f"Karar: {'EVET' if needs_realtime_info else 'HAYIR'} | search_query: '{search_query}'{override_note}"
         )
-        return DecideResponse(needs_realtime_info=needs_realtime_info, raw_output=raw_output, fallback_used=False)
+        return DecideResponse(
+            needs_realtime_info=needs_realtime_info,
+            search_query=search_query,
+            raw_output=raw_output,
+            fallback_used=False
+        )
 
     except Exception as e:
         logger.warning(f"/decide: Çırak model servisine ulaşılamadı ({DRAFT_LLAMA_SERVER_URL}): {e}. Güvenli taraf: EVET.")
-        return DecideResponse(needs_realtime_info=True, raw_output="", fallback_used=True)
+        return DecideResponse(needs_realtime_info=True, search_query=request.query, raw_output="", fallback_used=True)
 
 
 @app.post("/remember", response_model=RememberResponse)
