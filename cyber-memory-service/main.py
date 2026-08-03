@@ -29,6 +29,12 @@ QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "cyber_memory")
 LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://localhost:8082")
+# "Çırak" (draft/küçük) model — qwen2.5-0.5b-instruct, ayrı bir llama-server sürecinde,
+# ayrı bir portta (varsayılan 8084) bağımsız olarak çalışır. Bu model /decide endpoint'i
+# için kullanılır: kullanıcı mesajının güncel/harici bilgi gerektirip gerektirmediğine
+# hızlıca (düşük max_tokens ile ~1-2sn içinde) karar verir. Ana (14B, "usta") modelden
+# tamamen bağımsızdır — kaynak çekişmesine girmez, bu yüzden ana sohbet gecikmesini artırmaz.
+DRAFT_LLAMA_SERVER_URL = os.getenv("DRAFT_LLAMA_SERVER_URL", "http://localhost:8084")
 EMBEDDING_MODEL_NAME = "BAAI/bge-base-en-v1.5"
 
 # Arama için varsayılan parametreler
@@ -124,6 +130,14 @@ class HealthResponse(BaseModel):
     collection_exists: bool
     embedding_model_loaded: bool
     collection_points_count: Optional[int] = None
+
+class DecideRequest(BaseModel):
+    query: str
+
+class DecideResponse(BaseModel):
+    needs_realtime_info: bool
+    raw_output: str
+    fallback_used: bool = False
 
 # 6. BAŞLANGIÇ KONTROLLERİ
 @app.on_event("startup")
@@ -347,6 +361,73 @@ async def web_search(request: WebSearchRequest):
         logger.error(f"Web araması (Tavily) sırasında hata: {e}", exc_info=True)
         # Web arama hatası ana sohbet akışını çökertmesin diye boş sonuç dönüyoruz
         return WebSearchResponse(results=[], found=False)
+
+
+@app.post("/decide", response_model=DecideResponse)
+async def decide_needs_realtime_info(request: DecideRequest):
+    """
+    'Çırak-usta' mimarisinin karar adımı: kullanıcının sorusunu KÜÇÜK modele (qwen2.5-0.5b,
+    ayrı port 8084'te, ana 14B modelden bağımsız çalışır) verip, bu sorunun güncel/harici/
+    gerçek-zamanlı bilgi gerektirip gerektirmediğine SADECE EVET/HAYIR ile karar verdiriyoruz.
+
+    Bu adım eskiden (route.ts içinde) basit bir anahtar kelime taramasıydı (isLikelyTimeSensitiveQuery)
+    — hem isabetsizdi hem de RAG/web search'ün gereksiz yere çalışıp büyük modele (CPU'da yavaş)
+    ekstra gecikme eklemesine yol açıyordu. Küçük model AYRI bir süreçte/portta çalıştığı için
+    ana modelle kaynak çekişmesine girmez; max_tokens çok düşük tutulduğu için (~5-10) cevap
+    tipik olarak 1-2 saniyede döner.
+
+    Küçük model servisine ulaşılamazsa veya beklenmeyen bir çıktı dönerse, GÜVENLİ TARAFTA
+    kalıyoruz: needs_realtime_info=True döndürüyoruz (yani eskisi gibi RAG+web search çalışsın) —
+    böylece karar mekanizması arızalansa bile en kötü ihtimalle "gereksiz yere biraz gecikme"
+    yaşanır, ama güncel bilgi gerektiren bir soru asla sessizce atlanmaz.
+    """
+    decision_prompt = (
+        "Aşağıdaki kullanıcı mesajını oku. Bu mesaj güncel, harici veya gerçek-zamanlı bilgi "
+        "(bugünün tarihi/haberi, güncel döviz kuru, hava durumu, son dakika gelişmesi, henüz "
+        "olmuş bir olayın sonucu, fiyat/kur/skor gibi anlık bir veri vb.) gerektiriyor mu?\n"
+        "SADECE tek bir kelime yaz: EVET veya HAYIR. Başka hiçbir şey yazma, açıklama yapma.\n\n"
+        f"Kullanıcı mesajı: {request.query}"
+    )
+
+    try:
+        request_timeout = httpx.Timeout(connect=3.0, read=8.0, write=3.0, pool=3.0)
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
+            response = await client.post(
+                f"{DRAFT_LLAMA_SERVER_URL}/v1/chat/completions",
+                json={
+                    "model": "models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                    "messages": [
+                        {"role": "system", "content": "Sen sadece EVET veya HAYIR yazan kısa bir sınıflandırıcısın."},
+                        {"role": "user", "content": decision_prompt}
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 8,
+                    "stream": False
+                }
+            )
+
+        if response.status_code != 200:
+            logger.warning(f"/decide: Çırak model beklenmeyen durum kodu döndürdü: {response.status_code}. Güvenli taraf: EVET.")
+            return DecideResponse(needs_realtime_info=True, raw_output="", fallback_used=True)
+
+        raw_output = response.json()["choices"][0]["message"]["content"].strip()
+        normalized = raw_output.upper()
+
+        if "HAYIR" in normalized and "EVET" not in normalized:
+            needs_realtime_info = False
+        elif "EVET" in normalized:
+            needs_realtime_info = True
+        else:
+            # Beklenmeyen/çok belirsiz çıktı — güvenli tarafta kal
+            logger.warning(f"/decide: Çırak modelden belirsiz çıktı: '{raw_output}'. Güvenli taraf: EVET.")
+            needs_realtime_info = True
+
+        logger.info(f"/decide: Sorgu: '{request.query[:50]}...' | Çırak model çıktısı: '{raw_output}' | Karar: {'EVET' if needs_realtime_info else 'HAYIR'}")
+        return DecideResponse(needs_realtime_info=needs_realtime_info, raw_output=raw_output, fallback_used=False)
+
+    except Exception as e:
+        logger.warning(f"/decide: Çırak model servisine ulaşılamadı ({DRAFT_LLAMA_SERVER_URL}): {e}. Güvenli taraf: EVET.")
+        return DecideResponse(needs_realtime_info=True, raw_output="", fallback_used=True)
 
 
 @app.post("/remember", response_model=RememberResponse)
