@@ -147,11 +147,25 @@ export async function POST(req: NextRequest) {
         if (webSearchResponse.ok) {
           const webSearchData = await webSearchResponse.json();
           if (webSearchData.found && webSearchData.results && webSearchData.results.length > 0) {
-            const webResults = webSearchData.results
-              .map((r: any) => `- ${r.title}: ${r.snippet}`)
-              .join("\n");
-            webSearchContext = `Aşağıda bu soruyla ilgili güncel web arama sonuçları var. Bu bilgiler gerçek zamanlıdır, cevabında kullanabilirsin:\n${webResults}`;
-            console.log("Web arama bağlamı başarıyla enjekte edildi.");
+            // GÜVENLİK KATMANI (savunma derinliği): Hafıza servisi zaten sıkı doğrulama yapıyor,
+            // ama burada da her sonucun makul bir başlık/özet içerdiğini ve aşırı uzun/şüpheli
+            // olmadığını kontrol ediyoruz. Herhangi bir sonuç bu kritere uymuyorsa TÜM web arama
+            // bağlamını atlıyoruz (kısmi/bozuk veriyle modele gitmektense hiç gitmemesi daha güvenli).
+            const validResults = webSearchData.results.filter((r: any) =>
+              typeof r.title === "string" && typeof r.snippet === "string" &&
+              r.title.trim().length > 0 && r.snippet.trim().length > 0 &&
+              r.title.length <= 300 && r.snippet.length <= 600
+            );
+
+            if (validResults.length > 0 && validResults.length === webSearchData.results.length) {
+              const webResults = validResults
+                .map((r: any) => `- ${r.title}: ${r.snippet}`)
+                .join("\n");
+              webSearchContext = `Aşağıda bu soruyla ilgili güncel web arama sonuçları var. Bu bilgiler gerçek zamanlıdır, cevabında kullanabilirsin:\n${webResults}`;
+              console.log("Web arama bağlamı başarıyla enjekte edildi.");
+            } else {
+              console.warn("Web arama sonuçlarından bazıları doğrulamayı geçemedi, güvenlik için tüm bağlam atlandı.");
+            }
           }
         } else {
           console.warn(`Web arama servisi hata döndürdü: ${webSearchResponse.status}`);

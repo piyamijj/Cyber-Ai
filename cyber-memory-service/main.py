@@ -306,11 +306,22 @@ async def web_search(request: WebSearchRequest):
                 data={"q": request.query}
             )
 
+        # SIKI DOĞRULAMA 1: Sadece TAM OLARAK 200 durum kodunu kabul ediyoruz.
+        # DuckDuckGo bazen 202 gibi "ara" durum kodlarıyla bot-engelleme/CAPTCHA
+        # sayfası döndürebiliyor; bunları kesinlikle işlemiyoruz.
         if response.status_code != 200:
-            logger.warning(f"Web arama isteği başarısız oldu. Durum kodu: {response.status_code}")
+            logger.warning(f"Web arama isteği beklenmeyen durum kodu döndürdü: {response.status_code} (muhtemelen bot engellemesi)")
             return WebSearchResponse(results=[], found=False)
 
         raw_html = response.text
+
+        # SIKI DOĞRULAMA 2: Yanıtın gerçekten bir arama sonucu sayfası olup olmadığını
+        # (CAPTCHA/anomaly-detection sayfası DEĞİL) doğruluyoruz. DuckDuckGo'nun
+        # bot-engelleme sayfalarında "anomaly-modal" veya "challenge-form" gibi
+        # belirteçler olur ve "result__a" sınıfı hiç bulunmaz.
+        if "result__a" not in raw_html or "anomaly-modal" in raw_html or "challenge-form" in raw_html:
+            logger.warning("Web arama yanıtı geçerli bir sonuç sayfası değil (muhtemelen CAPTCHA/bot engelleme sayfası). Atlanıyor.")
+            return WebSearchResponse(results=[], found=False)
 
         # DuckDuckGo'nun HTML sayfasındaki sonuç bloklarını basit bir regex ile ayrıştırıyoruz
         # (ağır bir HTML parser kütüphanesi eklemeden, standart kütüphane ile).
@@ -328,12 +339,20 @@ async def web_search(request: WebSearchRequest):
             title_clean = html.unescape(re.sub(r"<[^>]+>", "", title_html)).strip()
             snippet_clean = html.unescape(re.sub(r"<[^>]+>", "", snippet_html)).strip()
 
-            if title_clean and snippet_clean:
-                results.append(WebSearchResult(
-                    title=title_clean,
-                    snippet=snippet_clean,
-                    url=url_match
-                ))
+            # SIKI DOĞRULAMA 3: Temizlenen metnin makul, gerçek bir sonuç gibi göründüğünü
+            # kontrol ediyoruz. Çok kısa/boş metinleri veya makul olmayan uzunlukta
+            # (muhtemelen ayrıştırma hatası sonucu birleşmiş çöp veri) metinleri reddediyoruz.
+            if not title_clean or not snippet_clean:
+                continue
+            if len(title_clean) > 300 or len(snippet_clean) > 600:
+                logger.warning("Şüpheli derecede uzun bir sonuç metni tespit edildi, atlanıyor (muhtemelen ayrıştırma hatası).")
+                continue
+
+            results.append(WebSearchResult(
+                title=title_clean[:300],
+                snippet=snippet_clean[:600],
+                url=url_match
+            ))
 
         found = len(results) > 0
         logger.info(f"Web araması tamamlandı. Sorgu: '{request.query[:40]}...' | Bulunan sonuç: {len(results)}")
