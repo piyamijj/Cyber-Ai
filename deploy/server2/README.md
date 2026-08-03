@@ -9,11 +9,33 @@
 # - Çırak model (0.5B) ve Qdrant Vektör Veritabanı bu ikinci sunucuya taşınarak,
 #   Sunucu 1'deki (79.76.63.191) 14B Usta modelin CPU üzerindeki yükü tamamen sıfırlanır.
 # - Usta model artık Sunucu 1'in 4 OCPU çekirdeğini tek başına ve tam verimle kullanır.
-# - IP Geolocation analizimize göre, her iki sunucunuz da Oracle Cloud Stockholm (İsveç)
-#   veri merkezinde yer almaktadır. Bu sayede aralarındaki ağ gecikmesi (network latency)
-#   son derece düşüktür (tipik olarak <2ms). Bu ihmal edilebilir ağ maliyeti, CPU kilitlenmesini
-#   kökten çözmenin getirdiği büyük performans kazancının yanında tamamen önemsizdir.
+# - KESİN BİLGİ (Oracle Cloud konsolundan doğrulandı): Her iki sunucu da AYNI Oracle Cloud
+#   region'ında — eu-stockholm-1 (Sweden Central). Sunucu 2: VM.Standard.E3.Flex, 4 OCPU,
+#   64GB RAM, Ubuntu 24.04, "cyber" adlı VCN içinde. Aralarındaki ağ gecikmesi bu sayede
+#   çok düşük olacaktır. Bu ihmal edilebilir ağ maliyeti, CPU kilitlenmesini kökten
+#   çözmenin getirdiği büyük performans kazancının yanında önemsizdir.
+# - PRIVATE IP FIRSATI: Eğer Sunucu 1 de AYNI VCN'de ("cyber") ise, iki sunucu birbirine
+#   PUBLIC IP üzerinden değil, VCN içi PRIVATE IP üzerinden doğrudan (dahili ağ) haberleşebilir.
+#   Bu HEM DAHA HIZLI (trafik Oracle'ın dış ağına hiç çıkmaz) HEM DE DAHA GÜVENLİDİR
+#   (public internetten erişim yüzeyi azalır). Adım 0'da bunu kontrol edeceğiz.
 # =====================================================================================
+
+## ADIM 0: AYNI VCN İÇİNDE OLUP OLMADIĞINIZI KONTROL EDİN (ÖNCELİKLE YAPIN)
+
+Docker kurulumuna başlamadan önce, iki sunucunun aynı Virtual Cloud Network (VCN) içinde olup olmadığını kontrol edin — bu, aşağıdaki adımlarda PUBLIC IP mi PRIVATE IP mi kullanacağınızı belirler.
+
+1. **Oracle Cloud Console**'a giriş yapın.
+2. **Compute > Instances** bölümüne gidin, Sunucu 2'nizin (instance-20260804-0125) üzerine tıklayın.
+3. **Networking** (Ağ) sekmesine geçin. Burada şunları not edin:
+   - **VCN adı** (örn. "cyber")
+   - **Private IP adresi** (genelde `10.x.x.x` formatında, örn. `10.0.0.15`)
+4. Aynı işlemi Sunucu 1 (79.76.63.191) için de yapın ve VCN adının AYNI olup olmadığını karşılaştırın.
+
+**Sonuç değerlendirmesi:**
+- ✅ **VCN adları AYNIYSA** ("cyber" = "cyber"): Aşağıdaki tüm adımlarda `79.76.38.185` (Sunucu 2 public IP) yerine Sunucu 2'nin **private IP**'sini kullanın (`docker-compose.yml` dosyasında port mapping değişmez, ama `cyber-memory.service` içindeki `QDRANT_HOST`/`DRAFT_LLAMA_SERVER_URL` değerlerini ve `SECURITY.md`'deki firewall kurallarını private IP'lerle güncelleyin — her iki dosyada da bunun için hazır, yorum satırı halinde alternatif satırlar bırakıldı).
+- ⚠️ **VCN adları FARKLIYSA**: Public IP (`79.76.38.185`) kullanmaya devam edin, bu rehberdeki varsayılan adımlar zaten bunun için yazıldı — hiçbir ek işlem gerekmez.
+
+**Emin değilseniz veya konsol ekranını bana paylaşmak isterseniz**, private IP adresini ve VCN adını bana iletebilirsiniz — ben yapılandırmayı kesinleştiririm.
 
 ## ADIM 1: SUNUCU 2'YE SSH İLE BAĞLANIN
 Kendi yerel terminalinizden (veya Termux ortamınızdan) yeni boş Sunucu 2'ye SSH ile bağlanın:

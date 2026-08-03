@@ -20,6 +20,16 @@
 #   güncellenerek Qdrant ve Çırak model adresleri Sunucu 2'nin IP'sine yönlendirilir:
 #     Environment=QDRANT_HOST=79.76.38.185
 #     Environment=DRAFT_LLAMA_SERVER_URL=http://79.76.38.185:8088
+#
+# PRIVATE IP NOTU (Oracle Cloud konsolundan doğrulandı - iki sunucu da eu-stockholm-1
+# region'ında, "cyber" adlı VCN'de olabilir): Aşağıdaki port eşlemeleri (ports:) Docker
+# tarafında varsayılan olarak TÜM ağ arayüzlerine (0.0.0.0) bind eder — bu, hem public
+# hem private IP üzerinden erişilebilir olması demektir. Güvenliği ARTIRMAK için, eğer
+# private IP kullanacaksanız port eşlemesini sadece o arayüze sabitleyebilirsiniz, örn.
+# "10.0.0.15:6333:6333" (Sunucu 2'nin kendi private IP'si). Bu adımı deploy/server2/
+# README.md'nin 0. Adımı ile birlikte değerlendirin. Sabitlemek istemiyorsanız (veya
+# hangi private IP'yi kullanacağınızdan emin değilseniz) varsayılan "6333:6333" ile
+# devam edip güvenliği SECURITY.md'deki firewall kurallarına bırakabilirsiniz.
 # =====================================================================================
 
 version: '3.8'

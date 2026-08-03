@@ -27,15 +27,26 @@ StandardError=journal
 # DAGITIK MIMARI GUNCELLEMESI (Sunucu 2'ye tasima sonrasi):
 # -----------------------------------------------------------
 # Asagidaki QDRANT_HOST ve DRAFT_LLAMA_SERVER_URL degerleri, Qdrant ve Cirak modelin
-# Sunucu 2'ye (79.76.38.185) tasinmasindan SONRA guncellenmistir. Eger henuz tasima
-# yapmadiysaniz (Qdrant/Cirak hala bu sunucuda calisiyorsa), bu iki satiri
-# "localhost" olarak GERI ALIN, aksi halde hafiza servisi yanlis adrese baglanmaya calisir.
+# Sunucu 2'ye tasinmasindan SONRA guncellenmistir. Eger henuz tasima yapmadiysaniz
+# (Qdrant/Cirak hala bu sunucuda calisiyorsa), bu iki satiri "localhost" olarak GERI
+# ALIN, aksi halde hafiza servisi yanlis adrese baglanmaya calisir.
+#
+# PRIVATE IP NOTU (ONEMLI - Oracle Cloud konsolundan dogrulandi):
+# -----------------------------------------------------------------
+# Sunucu 1 ve Sunucu 2 AYNI Oracle Cloud region'inda (eu-stockholm-1). Eger Networking
+# sekmesinden ikisinin de AYNI VCN'de ("cyber" adinda) oldugunu dogrularsaniz, asagidaki
+# adresleri PUBLIC IP (79.76.38.185) yerine Sunucu 2'nin PRIVATE IP'si ile degistirin —
+# bu hem daha hizli (VCN ici trafik) hem daha guvenlidir (public internete hic cikmaz).
+# Sunucu 2'nin private IP'sini Oracle Cloud Console > Compute > Instances > (Sunucu 2)
+# > Networking sekmesinden gorebilirsiniz (genelde 10.x.x.x formatinda).
 Environment=QDRANT_HOST=79.76.38.185
+# Environment=QDRANT_HOST=10.0.0.XX   # <-- Ayni VCN dogrulandiysa bu satiri kullanip yukarikini yorum yapin
 Environment=QDRANT_PORT=6333
 Environment=QDRANT_COLLECTION=cyber_memory
 Environment=LLAMA_SERVER_URL=http://localhost:8082
 # DRAFT_LLAMA_SERVER_URL artik Sunucu 2'deki Docker konteynerinde calisan cirak modeli isaret eder.
 Environment=DRAFT_LLAMA_SERVER_URL=http://79.76.38.185:8088
+# Environment=DRAFT_LLAMA_SERVER_URL=http://10.0.0.XX:8088   # <-- Ayni VCN icin alternatif
 
 [Install]
 WantedBy=multi-user.target

@@ -1,6 +1,15 @@
 # =====================================================================================
 # CYBER AI - DAĞITIK MİMARİ GÜVENLİK VE ERİŞİM KONTROL REHBERİ (SECURITY.md)
 # =====================================================================================
+#
+# GÜNCELLEME (Oracle Cloud konsolundan doğrulandı): Sunucu 1 ve Sunucu 2 AYNI region'da
+# (eu-stockholm-1, Sweden Central). Eğer Networking sekmesinden ikisinin de AYNI VCN'de
+# ("cyber" adında) olduğu doğrulanırsa, aşağıdaki tüm kurallarda PUBLIC IP (79.76.63.191)
+# yerine Sunucu 1'in PRIVATE IP'sini kullanabilirsiniz — bu güvenliği ARTIRIR (trafik
+# hiç public internete çıkmaz) ama Security List/UFW kuralı İHTİYACINI ORTADAN KALDIRMAZ:
+# aynı VCN içindeki BAŞKA bir kaynak (yanlışlıkla veya kötü niyetle) hâlâ private IP
+# üzerinden bu portlara erişmeye çalışabilir. Bu yüzden private IP kullanırken de aynı
+# kısıtlama mantığını (sadece Sunucu 1'in private IP'sinden izin) uygulamaya devam edin.
 # Bu rehber, Sunucu 2'de (79.76.38.185) Docker ile ayağa kaldıracağınız Qdrant (6333/6334)
 # ve Çırak model (8088) servislerinin güvenliğini sağlamak için hazırlanmıştır.
 #
