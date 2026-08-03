@@ -37,6 +37,20 @@ LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://localhost:8082")
 DRAFT_LLAMA_SERVER_URL = os.getenv("DRAFT_LLAMA_SERVER_URL", "http://localhost:8088")
 EMBEDDING_MODEL_NAME = "BAAI/bge-base-en-v1.5"
 
+# /decide endpoint'i için İKİNCİ SAVUNMA KATMANI: küçük model (0.5B) HAYIR derse bile, mesajda
+# bu belirgin anahtar kelimelerden biri geçiyorsa karar EVET'e çevrilir. Küçük modeller bazen
+# açıkça güncel bir soruyu (ör. "bugün dolar kuru kaç") yanlış sınıflandırabiliyor; bu liste
+# ucuz ve hızlı bir ek güvenlik ağı olarak çalışır, LLM kararının tek başına yeterli olmadığı
+# durumlarda devreye girer.
+REALTIME_OVERRIDE_KEYWORDS = [
+    "güncel", "bugün", "bu gün", "şu an", "şu anda", "son durum", "son dakika",
+    "haber", "haberler", "ne oldu", "ne durumda", "kim oldu", "kim kazandı",
+    "seçim", "kriz", "bu hafta", "bu ay", "bu yıl", "geçen hafta", "dün", "yarın",
+    "yeni açıklama", "son gelişme", "kaç oldu", "fiyatı ne", "kuru ne", "kuru kaç",
+    "dolar kuru", "euro kuru", "borsa", "bitcoin", "kripto", "hava durumu",
+    "cumhurbaşkanı", "başbakan", "hangi parti", "yeni parti", "maç", "skor", "deprem"
+]
+
 # Arama için varsayılan parametreler
 SEARCH_TOP_K = int(os.getenv("SEARCH_TOP_K", "5"))
 # Cosine similarity için eşik değer. Alakasız geçmiş bilgileri elemek için kullanılır.
@@ -380,13 +394,34 @@ async def decide_needs_realtime_info(request: DecideRequest):
     kalıyoruz: needs_realtime_info=True döndürüyoruz (yani eskisi gibi RAG+web search çalışsın) —
     böylece karar mekanizması arızalansa bile en kötü ihtimalle "gereksiz yere biraz gecikme"
     yaşanır, ama güncel bilgi gerektiren bir soru asla sessizce atlanmaz.
+
+    NOT (v2 — few-shot iyileştirmesi): İlk sürümde prompt açıklama tabanlıydı ve 0.5B model
+    "bugün dolar kuru kaç, güncel durum ne?" gibi AÇIKÇA güncel veri gerektiren bir soruyu bile
+    HAYIR olarak yanlış sınıflandırabiliyordu. Küçük modeller soyut tanımlardan çok somut
+    örneklerden (few-shot) çok daha iyi genelleme yapar; bu yüzden prompt'a net EVET/HAYIR
+    örnekleri eklendi. Ayrıca ikinci bir savunma katmanı olarak, küçük model HAYIR derse bile
+    mesajda güncel/finansal/zamana-duyarlı belirgin anahtar kelimeler varsa karar EVET'e
+    çevriliyor (bkz. aşağıdaki REALTIME_OVERRIDE_KEYWORDS kontrolü) — böylece tek bir küçük
+    modelin kararına tamamen bağımlı kalınmıyor.
     """
     decision_prompt = (
-        "Aşağıdaki kullanıcı mesajını oku. Bu mesaj güncel, harici veya gerçek-zamanlı bilgi "
-        "(bugünün tarihi/haberi, güncel döviz kuru, hava durumu, son dakika gelişmesi, henüz "
-        "olmuş bir olayın sonucu, fiyat/kur/skor gibi anlık bir veri vb.) gerektiriyor mu?\n"
-        "SADECE tek bir kelime yaz: EVET veya HAYIR. Başka hiçbir şey yazma, açıklama yapma.\n\n"
-        f"Kullanıcı mesajı: {request.query}"
+        "Bir kullanıcı mesajının GÜNCEL/HARİCİ/GERÇEK-ZAMANLI bilgi (döviz kuru, hava durumu, "
+        "haberler, son dakika, fiyatlar, skorlar, bugünün tarihi/olayları vb.) gerektirip "
+        "gerektirmediğine karar veren bir sınıflandırıcısın. SADECE 'EVET' veya 'HAYIR' yaz.\n\n"
+        "Örnekler:\n"
+        "Mesaj: bugün dolar kuru kaç?\nCevap: EVET\n\n"
+        "Mesaj: bugün hava nasıl olacak?\nCevap: EVET\n\n"
+        "Mesaj: dün haberlerde ne oldu?\nCevap: EVET\n\n"
+        "Mesaj: son dakika deprem oldu mu?\nCevap: EVET\n\n"
+        "Mesaj: bitcoin fiyatı şu an ne kadar?\nCevap: EVET\n\n"
+        "Mesaj: yarın İstanbul'da maç var mı, skor ne olur?\nCevap: EVET\n\n"
+        "Mesaj: sen kimsin?\nCevap: HAYIR\n\n"
+        "Mesaj: python nedir, nasıl öğrenilir?\nCevap: HAYIR\n\n"
+        "Mesaj: merhaba, nasılsın?\nCevap: HAYIR\n\n"
+        "Mesaj: bana bir şiir yazar mısın?\nCevap: HAYIR\n\n"
+        "Mesaj: 2. dünya savaşı ne zaman bitti?\nCevap: HAYIR\n\n"
+        "Mesaj: bir fonksiyonu python'da nasıl tanımlarım?\nCevap: HAYIR\n\n"
+        f"Şimdi bu mesajı sınıflandır:\nMesaj: {request.query}\nCevap:"
     )
 
     try:
@@ -397,7 +432,7 @@ async def decide_needs_realtime_info(request: DecideRequest):
                 json={
                     "model": "models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
                     "messages": [
-                        {"role": "system", "content": "Sen sadece EVET veya HAYIR yazan kısa bir sınıflandırıcısın."},
+                        {"role": "system", "content": "Sen sadece EVET veya HAYIR yazan kısa bir sınıflandırıcısın. Örnekleri dikkatlice takip et."},
                         {"role": "user", "content": decision_prompt}
                     ],
                     "temperature": 0.0,
@@ -422,7 +457,21 @@ async def decide_needs_realtime_info(request: DecideRequest):
             logger.warning(f"/decide: Çırak modelden belirsiz çıktı: '{raw_output}'. Güvenli taraf: EVET.")
             needs_realtime_info = True
 
-        logger.info(f"/decide: Sorgu: '{request.query[:50]}...' | Çırak model çıktısı: '{raw_output}' | Karar: {'EVET' if needs_realtime_info else 'HAYIR'}")
+        # İKİNCİ SAVUNMA KATMANI: Küçük model HAYIR dedi ama mesajda güncel/zamana-duyarlı
+        # bilgiye açıkça işaret eden belirgin anahtar kelimeler varsa, kararı EVET'e çeviriyoruz.
+        # Bu, tek bir 0.5B modelin olası yanlış sınıflandırmasına karşı ucuz bir güvenlik ağıdır.
+        override_triggered = False
+        if not needs_realtime_info:
+            text_lower = request.query.lower()
+            if any(keyword in text_lower for keyword in REALTIME_OVERRIDE_KEYWORDS):
+                needs_realtime_info = True
+                override_triggered = True
+
+        override_note = " [ANAHTAR KELIME OVERRIDE ILE EVET'E CEVRILDI]" if override_triggered else ""
+        logger.info(
+            f"/decide: Sorgu: '{request.query[:50]}...' | Çırak model çıktısı: '{raw_output}' | "
+            f"Karar: {'EVET' if needs_realtime_info else 'HAYIR'}{override_note}"
+        )
         return DecideResponse(needs_realtime_info=needs_realtime_info, raw_output=raw_output, fallback_used=False)
 
     except Exception as e:
