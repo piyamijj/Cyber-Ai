@@ -153,10 +153,21 @@ export async function POST(req: NextRequest) {
       // Tarayıcıya veriyi gecikmesiz (real-time) iletirken, aynı zamanda asistanın ürettiği tüm cevabı
       // arka planda biriktiriyoruz. Akış bittiğinde bu cevabı hafıza servisine gönderip analiz ettireceğiz.
       if (upstreamResponse.body) {
-        const encoder = new TextEncoder();
         const decoder = new TextDecoder();
         let fullAssistantText = "";
         let sseBuffer = "";
+
+        // ÖNEMLİ DÜZELTME: waitUntil()'i stream'in flush() callback'i İÇİNDEN çağırmak yerine,
+        // burada (ana fonksiyon gövdesinde, senkron olarak) çağırıyoruz. Bu, waitUntil()'in
+        // Vercel'in çalışma ortamıyla doğru şekilde entegre olacağını garanti eder — bir stream
+        // callback'inin içinden (asenkron bir bağlamdan) çağırmanın bazı ortamlarda beklenmedik
+        // davranışlara (örn. isteğin bitmesini gereksiz yere beklemesi) yol açma ihtimalini ortadan kaldırır.
+        // Bunun için flush() sadece bir "resolver" fonksiyonunu tetikliyor; asıl waitUntil() çağrısı
+        // ana akışta, stream oluşturulur oluşturulmaz yapılıyor.
+        let resolveStreamDone: (text: string) => void;
+        const streamDonePromise = new Promise<string>((resolve) => {
+          resolveStreamDone = resolve;
+        });
 
         const transformStream = new TransformStream({
           transform(chunk, controller) {
@@ -187,24 +198,28 @@ export async function POST(req: NextRequest) {
             }
           },
           flush() {
-            // Akış tamamen bittiğinde, eğer bir asistan cevabı birikmişse ve kullanıcı mesajı varsa
-            // arka planda (kullanıcıyı hiç bekletmeden, fire-and-forget) hafıza kaydı isteği atıyoruz.
-            //
-            // ÖNEMLİ: Vercel'in serverless fonksiyonları, HTTP yanıtı istemciye tamamen gönderildikten
-            // hemen sonra çalışma ortamını dondurabilir/kapatabilir. Bu yüzden burada çağrıyı sadece
-            // "await'siz" (fire-and-forget) bırakmak yeterli DEĞİLDİR — çağrı hiç tamamlanmadan
-            // fonksiyon süreci sonlandırılabilir. `waitUntil()` bu isteğin arka planda gerçekten
-            // bitmesini bekleyecek şekilde fonksiyonun ömrünü uzatır.
-            if (latestUserMessage && fullAssistantText.trim().length > 0) {
-              waitUntil(
-                saveToMemoryFireAndForget(latestUserMessage, fullAssistantText, memoryServiceUrl)
-              );
-            }
+            // Akış tamamen bittiğinde sadece topladığımız metni "resolve" ediyoruz.
+            // Burada BAŞKA HİÇBİR ŞEY yapmıyoruz (fetch çağrısı, waitUntil çağrısı vb.) —
+            // bu callback'in tek işi, biriken metni dışarıdaki (senkron bağlamdaki) koda iletmek.
+            // Bu sayede flush() anında ve kesin olarak döner, stream'in kapanışını hiçbir şekilde geciktirmez.
+            resolveStreamDone(fullAssistantText);
           }
         });
 
         // Upstream akışını transform süzgecinden geçirip istemciye dönüyoruz
         const transformedReadable = upstreamResponse.body.pipeThrough(transformStream);
+
+        // waitUntil()'i burada, ANA FONKSİYON GÖVDESİNDE (senkron bağlamda) çağırıyoruz.
+        // Bu Promise, stream tamamen bitene (flush() çalışana) kadar bekler, SONRA hafıza
+        // kaydı isteğini atar — ama bu bekleme tamamen arka planda gerçekleşir, `return`
+        // ile tarayıcıya döndürülen Response nesnesini hiçbir şekilde bloklamaz.
+        waitUntil(
+          streamDonePromise.then((finalText) => {
+            if (latestUserMessage && finalText.trim().length > 0) {
+              return saveToMemoryFireAndForget(latestUserMessage, finalText, memoryServiceUrl);
+            }
+          })
+        );
 
         return new Response(transformedReadable, {
           status: 200,
