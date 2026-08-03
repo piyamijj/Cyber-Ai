@@ -26,6 +26,29 @@ export const maxDuration = 290;
 const DEFAULT_UPSTREAM_URL = "http://79.76.63.191:8082";
 const DEFAULT_MEMORY_SERVICE_URL = "http://79.76.63.191:8083";
 
+// Bu kelime/kalıplar bir sorunun GÜNCEL/ZAMANA-DUYARLI bir konu (haber, güncel olay,
+// "şu an" geçerli bir bilgi) hakkında olabileceğine işaret eder. Basit bir anahtar kelime
+// kontrolü kullanıyoruz (modele ayrı bir "buna web araması gerekir mi?" sorusu sormak yerine) —
+// bu ekstra bir LLM çağrısı/gecikme eklemeden makul bir doğrulukla çalışır.
+const TIME_SENSITIVE_KEYWORDS = [
+  "güncel", "bugün", "bu gün", "şu an", "şu anda", "son durum", "son dakika",
+  "haber", "haberler", "ne oldu", "ne durumda", "kim oldu", "kim kazandı",
+  "seçim", "kriz", "bu hafta", "bu ay", "bu yıl", "geçen hafta", "dün",
+  "yeni açıklama", "son gelişme", "kaç oldu", "fiyatı ne", "kuru ne",
+  "cumhurbaşkanı", "başbakan", "hangi parti", "yeni parti"
+];
+
+/**
+ * Kullanıcının sorusunun güncel/zamana-duyarlı bir konu hakkında olup olmadığını
+ * basit bir anahtar kelime kontrolüyle tahmin eder. Kesin bir bilim değildir — amaç,
+ * her soruda web araması yapıp gereksiz gecikme eklemeden, gerçekten güncel bilgi
+ * gerektirebilecek soruları makul bir doğrulukla yakalamaktır.
+ */
+function isLikelyTimeSensitiveQuery(userMessage: string): boolean {
+  const text = userMessage.toLowerCase();
+  return TIME_SENSITIVE_KEYWORDS.some((keyword) => text.includes(keyword));
+}
+
 export async function POST(req: NextRequest) {
   try {
     // 1. İstek gövdesini ayrıştır ve doğrula
@@ -95,6 +118,45 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // 4.5. ADIM A2: Web Araması (Güncel/Zamana-Duyarlı Sorular İçin)
+    // Kullanıcının sorusu güncel bir olay/haber gibi görünüyorsa (basit anahtar kelime kontrolü ile
+    // tespit edilir), gerçek zamanlı bir web araması yapıyoruz. Bu sonuçlar SADECE bu cevap için
+    // kullanılır — hafızaya (Qdrant'a) KESİNLİKLE kaydedilmez, çünkü güncel bilgi zamanla bayatlar
+    // ve kalıcı olarak saklanırsa ileride yanıltıcı olur. Kullanıcıyı bekletmemek için kısa bir
+    // zaman aşımı koyuyoruz; başarısız olursa sessizce atlanır, sohbet normal devam eder.
+    let webSearchContext: string | null = null;
+    if (latestUserMessage && isLikelyTimeSensitiveQuery(latestUserMessage)) {
+      const webSearchController = new AbortController();
+      const webSearchTimeoutId = setTimeout(() => webSearchController.abort(), 6000);
+
+      try {
+        const webSearchResponse = await fetch(`${memoryServiceUrl}/web_search`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: latestUserMessage, max_results: 4 }),
+          signal: webSearchController.signal,
+        });
+
+        clearTimeout(webSearchTimeoutId);
+
+        if (webSearchResponse.ok) {
+          const webSearchData = await webSearchResponse.json();
+          if (webSearchData.found && webSearchData.results && webSearchData.results.length > 0) {
+            const webResults = webSearchData.results
+              .map((r: any) => `- ${r.title}: ${r.snippet}`)
+              .join("\n");
+            webSearchContext = `Aşağıda bu soruyla ilgili güncel web arama sonuçları var. Bu bilgiler gerçek zamanlıdır, cevabında kullanabilirsin:\n${webResults}`;
+            console.log("Web arama bağlamı başarıyla enjekte edildi.");
+          }
+        } else {
+          console.warn(`Web arama servisi hata döndürdü: ${webSearchResponse.status}`);
+        }
+      } catch (webSearchError: any) {
+        clearTimeout(webSearchTimeoutId);
+        console.warn("Web arama adımı atlandı veya zaman aşımına uğradı:", webSearchError.message || webSearchError);
+      }
+    }
+
     // 5. ADIM B: Sistem Mesajlarını Hazırla
     // Cyber AI kimliğini tanımlayan ana sistem mesajı
     const identitySystemMessage = {
@@ -102,12 +164,19 @@ export async function POST(req: NextRequest) {
       content: "Sen Cyber AI'sın (veya kısaca Cyber). Oracle Cloud üzerinde çalışan, yüksek performanslı ve özel bir yapay zeka asistanısın. Kim olduğun sorulduğunda asla 'Qwen' veya 'Alibaba' olduğunu söyleme; kendini her zaman 'Cyber AI' olarak tanıt. Türkçe konuş."
     };
 
-    // Mesaj listesini oluşturuyoruz: [Kimlik Sistem Mesajı, RAG Sistem Mesajı (varsa), ...Kullanıcı Mesajları]
+    // Mesaj listesini oluşturuyoruz: [Kimlik Sistem Mesajı, RAG Sistem Mesajı (varsa),
+    // Web Arama Sistem Mesajı (varsa), ...Kullanıcı Mesajları]
     const formattedMessages = [identitySystemMessage];
     if (ragContext) {
       formattedMessages.push({
         role: "system",
         content: ragContext
+      });
+    }
+    if (webSearchContext) {
+      formattedMessages.push({
+        role: "system",
+        content: webSearchContext
       });
     }
     formattedMessages.push(...messages);

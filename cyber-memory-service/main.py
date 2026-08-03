@@ -1,4 +1,6 @@
 import os
+import re
+import html
 import logging
 import datetime
 import uuid
@@ -36,6 +38,13 @@ SEARCH_TOP_K = int(os.getenv("SEARCH_TOP_K", "5"))
 # gerçek eşleşmeler bile daha düşük skorlar üretebilir (ör. 0.3-0.5 aralığı). Bu yüzden
 # eşiği düşük tutuyoruz; çok fazla alakasız sonuç gelirse ileride yükseltilebilir.
 SEARCH_SCORE_THRESHOLD = float(os.getenv("SEARCH_SCORE_THRESHOLD", "0.2"))
+
+# Web araması için varsayılan sonuç sayısı ve zaman aşımı
+WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "4"))
+# DuckDuckGo'nun JavaScript gerektirmeyen, API anahtarı istemeyen HTML arama sayfası.
+# Resmi bir API değildir (ücretsiz, kayıt gerektirmeyen bir alternatif olduğu için tercih edildi);
+# DuckDuckGo'nun HTML yapısı değişirse bu ayrıştırma mantığının güncellenmesi gerekebilir.
+DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
 
 # 3. GLOBAL MODEL VE İSTEMCİ BAŞLATMALARI
 # Servis her istekte modeli baştan yüklemesin diye global olarak bir kez başlatıyoruz.
@@ -93,6 +102,19 @@ class RememberResponse(BaseModel):
     saved: bool
     reason: str
     saved_text: Optional[str] = None
+
+class WebSearchRequest(BaseModel):
+    query: str
+    max_results: Optional[int] = None
+
+class WebSearchResult(BaseModel):
+    title: str
+    snippet: str
+    url: str
+
+class WebSearchResponse(BaseModel):
+    results: List[WebSearchResult]
+    found: bool
 
 class HealthResponse(BaseModel):
     status: str
@@ -256,6 +278,72 @@ def is_likely_trivial(user_message: str) -> bool:
         if text.startswith(pattern):
             return True
     return False
+
+
+@app.post("/web_search", response_model=WebSearchResponse)
+async def web_search(request: WebSearchRequest):
+    """
+    Güncel/zamana-duyarlı sorular için gerçek zamanlı web araması yapar.
+    DuckDuckGo'nun ücretsiz, API anahtarı gerektirmeyen HTML arama sayfasını kullanır.
+
+    ÖNEMLİ: Bu endpoint'in döndürdüğü sonuçlar KALICI OLARAK Qdrant'a KAYDEDİLMEZ.
+    Güncel bilgi zamanla bayatlar; kalıcı hafızaya yazılırsa ileride yanıltıcı olur.
+    Sonuçlar sadece o anki soruya cevap vermek için kullanılıp hemen atılır.
+    """
+    max_results = request.max_results or WEB_SEARCH_MAX_RESULTS
+
+    try:
+        # DuckDuckGo'nun HTML arama sayfasına normal bir tarayıcı gibi görünen
+        # bir User-Agent ile istek atıyoruz (bazı botlara engelleme yapılabiliyor).
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        }
+
+        async with httpx.AsyncClient(timeout=10.0, headers=headers, follow_redirects=True) as client:
+            response = await client.post(
+                DUCKDUCKGO_HTML_URL,
+                data={"q": request.query}
+            )
+
+        if response.status_code != 200:
+            logger.warning(f"Web arama isteği başarısız oldu. Durum kodu: {response.status_code}")
+            return WebSearchResponse(results=[], found=False)
+
+        raw_html = response.text
+
+        # DuckDuckGo'nun HTML sayfasındaki sonuç bloklarını basit bir regex ile ayrıştırıyoruz
+        # (ağır bir HTML parser kütüphanesi eklemeden, standart kütüphane ile).
+        # Her sonuç şu yapıda: <a class="result__a" href="...">BAŞLIK</a> ... <a class="result__snippet" ...>ÖZET</a>
+        result_blocks = re.findall(
+            r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?'
+            r'class="result__snippet"[^>]*>(.*?)</a>',
+            raw_html,
+            re.DOTALL
+        )
+
+        results = []
+        for url_match, title_html, snippet_html in result_blocks[:max_results]:
+            # HTML etiketlerini temizle ve HTML entity'lerini (ör. &amp;) çöz
+            title_clean = html.unescape(re.sub(r"<[^>]+>", "", title_html)).strip()
+            snippet_clean = html.unescape(re.sub(r"<[^>]+>", "", snippet_html)).strip()
+
+            if title_clean and snippet_clean:
+                results.append(WebSearchResult(
+                    title=title_clean,
+                    snippet=snippet_clean,
+                    url=url_match
+                ))
+
+        found = len(results) > 0
+        logger.info(f"Web araması tamamlandı. Sorgu: '{request.query[:40]}...' | Bulunan sonuç: {len(results)}")
+
+        return WebSearchResponse(results=results, found=found)
+
+    except Exception as e:
+        logger.error(f"Web araması sırasında hata: {e}", exc_info=True)
+        # Web arama hatası ana sohbet akışını çökertmesin diye boş sonuç dönüyoruz
+        return WebSearchResponse(results=[], found=False)
 
 
 @app.post("/remember", response_model=RememberResponse)
