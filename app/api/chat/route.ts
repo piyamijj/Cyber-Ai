@@ -125,7 +125,12 @@ export async function POST(req: NextRequest) {
     // ve kalıcı olarak saklanırsa ileride yanıltıcı olur. Kullanıcıyı bekletmemek için kısa bir
     // zaman aşımı koyuyoruz; başarısız olursa sessizce atlanır, sohbet normal devam eder.
     let webSearchContext: string | null = null;
-    if (latestUserMessage && isLikelyTimeSensitiveQuery(latestUserMessage)) {
+    // GEÇİCİ OLARAK DEVRE DIŞI: Web arama entegrasyonu bozuk/kodlaması hatalı sonuçlar
+    // üretebiliyordu (DuckDuckGo scraping çıktısı temizlenmeden modele veriliyordu) ve
+    // ekstra gecikmeye neden oluyordu. Kod sağlamlaştırılıp iyice test edilene kadar
+    // "false &&" ile bu adımı tamamen atlıyoruz — normal sohbet deneyimi bundan etkilenmez.
+    const WEB_SEARCH_ENABLED = false;
+    if (WEB_SEARCH_ENABLED && latestUserMessage && isLikelyTimeSensitiveQuery(latestUserMessage)) {
       const webSearchController = new AbortController();
       const webSearchTimeoutId = setTimeout(() => webSearchController.abort(), 6000);
 
