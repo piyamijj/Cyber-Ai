@@ -41,10 +41,12 @@ SEARCH_SCORE_THRESHOLD = float(os.getenv("SEARCH_SCORE_THRESHOLD", "0.2"))
 
 # Web araması için varsayılan sonuç sayısı ve zaman aşımı
 WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "4"))
-# DuckDuckGo'nun JavaScript gerektirmeyen, API anahtarı istemeyen HTML arama sayfası.
-# Resmi bir API değildir (ücretsiz, kayıt gerektirmeyen bir alternatif olduğu için tercih edildi);
-# DuckDuckGo'nun HTML yapısı değişirse bu ayrıştırma mantığının güncellenmesi gerekebilir.
-DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
+# Tavily API — resmi, API key'li arama servisi. DuckDuckGo'nun ücretsiz HTML kazıma
+# yöntemi sık sık CAPTCHA/bot-engellemesine takıldığı için (güvenilmez sonuç, bazen
+# gecikme) buna geçildi. Tavily özellikle LLM/agent kullanım senaryoları için tasarlanmış,
+# CAPTCHA riski taşımaz.
+TAVILY_API_URL = "https://api.tavily.com/search"
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
 # 3. GLOBAL MODEL VE İSTEMCİ BAŞLATMALARI
 # Servis her istekte modeli baştan yüklemesin diye global olarak bir kez başlatıyoruz.
@@ -284,7 +286,10 @@ def is_likely_trivial(user_message: str) -> bool:
 async def web_search(request: WebSearchRequest):
     """
     Güncel/zamana-duyarlı sorular için gerçek zamanlı web araması yapar.
-    DuckDuckGo'nun ücretsiz, API anahtarı gerektirmeyen HTML arama sayfasını kullanır.
+    Tavily API kullanır (resmi, ücretli/API-key'li servis) — DuckDuckGo HTML kazıma
+    yöntemi CAPTCHA/bot-engellemesine sık takıldığı için (sık sık boş/güvenilmez sonuç)
+    Tavily'ye geçildi; bu API doğrudan LLM/agent kullanım senaryoları için tasarlanmıştır
+    ve CAPTCHA riski taşımaz.
 
     ÖNEMLİ: Bu endpoint'in döndürdüğü sonuçlar KALICI OLARAK Qdrant'a KAYDEDİLMEZ.
     Güncel bilgi zamanla bayatlar; kalıcı hafızaya yazılırsa ileride yanıltıcı olur.
@@ -292,75 +297,54 @@ async def web_search(request: WebSearchRequest):
     """
     max_results = request.max_results or WEB_SEARCH_MAX_RESULTS
 
-    try:
-        # DuckDuckGo'nun HTML arama sayfasına normal bir tarayıcı gibi görünen
-        # bir User-Agent ile istek atıyoruz (bazı botlara engelleme yapılabiliyor).
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        }
+    if not TAVILY_API_KEY:
+        logger.warning("TAVILY_API_KEY tanımlı değil, web araması atlanıyor.")
+        return WebSearchResponse(results=[], found=False)
 
-        async with httpx.AsyncClient(timeout=10.0, headers=headers, follow_redirects=True) as client:
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
-                DUCKDUCKGO_HTML_URL,
-                data={"q": request.query}
+                TAVILY_API_URL,
+                headers={
+                    "Authorization": f"Bearer {TAVILY_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "query": request.query,
+                    "max_results": max_results,
+                },
             )
 
-        # SIKI DOĞRULAMA 1: Sadece TAM OLARAK 200 durum kodunu kabul ediyoruz.
-        # DuckDuckGo bazen 202 gibi "ara" durum kodlarıyla bot-engelleme/CAPTCHA
-        # sayfası döndürebiliyor; bunları kesinlikle işlemiyoruz.
         if response.status_code != 200:
-            logger.warning(f"Web arama isteği beklenmeyen durum kodu döndürdü: {response.status_code} (muhtemelen bot engellemesi)")
+            logger.warning(f"Tavily API beklenmeyen durum kodu döndürdü: {response.status_code} | {response.text[:200]}")
             return WebSearchResponse(results=[], found=False)
 
-        raw_html = response.text
-
-        # SIKI DOĞRULAMA 2: Yanıtın gerçekten bir arama sonucu sayfası olup olmadığını
-        # (CAPTCHA/anomaly-detection sayfası DEĞİL) doğruluyoruz. DuckDuckGo'nun
-        # bot-engelleme sayfalarında "anomaly-modal" veya "challenge-form" gibi
-        # belirteçler olur ve "result__a" sınıfı hiç bulunmaz.
-        if "result__a" not in raw_html or "anomaly-modal" in raw_html or "challenge-form" in raw_html:
-            logger.warning("Web arama yanıtı geçerli bir sonuç sayfası değil (muhtemelen CAPTCHA/bot engelleme sayfası). Atlanıyor.")
-            return WebSearchResponse(results=[], found=False)
-
-        # DuckDuckGo'nun HTML sayfasındaki sonuç bloklarını basit bir regex ile ayrıştırıyoruz
-        # (ağır bir HTML parser kütüphanesi eklemeden, standart kütüphane ile).
-        # Her sonuç şu yapıda: <a class="result__a" href="...">BAŞLIK</a> ... <a class="result__snippet" ...>ÖZET</a>
-        result_blocks = re.findall(
-            r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?'
-            r'class="result__snippet"[^>]*>(.*?)</a>',
-            raw_html,
-            re.DOTALL
-        )
+        data = response.json()
+        raw_results = data.get("results", [])
 
         results = []
-        for url_match, title_html, snippet_html in result_blocks[:max_results]:
-            # HTML etiketlerini temizle ve HTML entity'lerini (ör. &amp;) çöz
-            title_clean = html.unescape(re.sub(r"<[^>]+>", "", title_html)).strip()
-            snippet_clean = html.unescape(re.sub(r"<[^>]+>", "", snippet_html)).strip()
+        for item in raw_results[:max_results]:
+            title = (item.get("title") or "").strip()
+            # Tavily "content" alanında snippet benzeri bir özet döner
+            snippet = (item.get("content") or "").strip()
+            url = item.get("url") or ""
 
-            # SIKI DOĞRULAMA 3: Temizlenen metnin makul, gerçek bir sonuç gibi göründüğünü
-            # kontrol ediyoruz. Çok kısa/boş metinleri veya makul olmayan uzunlukta
-            # (muhtemelen ayrıştırma hatası sonucu birleşmiş çöp veri) metinleri reddediyoruz.
-            if not title_clean or not snippet_clean:
-                continue
-            if len(title_clean) > 300 or len(snippet_clean) > 600:
-                logger.warning("Şüpheli derecede uzun bir sonuç metni tespit edildi, atlanıyor (muhtemelen ayrıştırma hatası).")
+            if not title or not snippet:
                 continue
 
             results.append(WebSearchResult(
-                title=title_clean[:300],
-                snippet=snippet_clean[:600],
-                url=url_match
+                title=title[:300],
+                snippet=snippet[:600],
+                url=url
             ))
 
         found = len(results) > 0
-        logger.info(f"Web araması tamamlandı. Sorgu: '{request.query[:40]}...' | Bulunan sonuç: {len(results)}")
+        logger.info(f"Web araması (Tavily) tamamlandı. Sorgu: '{request.query[:40]}...' | Bulunan sonuç: {len(results)}")
 
         return WebSearchResponse(results=results, found=found)
 
     except Exception as e:
-        logger.error(f"Web araması sırasında hata: {e}", exc_info=True)
+        logger.error(f"Web araması (Tavily) sırasında hata: {e}", exc_info=True)
         # Web arama hatası ana sohbet akışını çökertmesin diye boş sonuç dönüyoruz
         return WebSearchResponse(results=[], found=False)
 
