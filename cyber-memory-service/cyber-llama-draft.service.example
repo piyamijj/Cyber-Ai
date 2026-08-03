@@ -1,0 +1,93 @@
+# =====================================================================================
+# CYBER AI - ÇIRAK (DRAFT) MODEL SYSTEMD SERVİS ÖRNEĞİ (cyber-llama-draft.service)
+# =====================================================================================
+# Bu dosya, sunucunuzda (Oracle Cloud, 4 OCPU, GPU YOK) çalışan mevcut
+# 'cyber-llama-draft' (0.5B, port 8088) servisinizi CPU çekişmesini (contention) önleyecek
+# ve prompt caching (önbellekleme) özelliğini sistematik hale getirecek şekilde
+# yapılandırmanız için bir REFERANS/DOKÜMANTASYON örneğidir.
+#
+# NASIL UYGULANIR?
+# ----------------
+# 1. Sunucunuzdaki mevcut servis dosyasını açın:
+#    sudo nano /etc/systemd/system/cyber-llama-draft.service
+# 2. Aşağıdaki 'Nice=' satırını ve 'ExecStart' içindeki prompt-cache parametrelerini
+#    kendi dosyanıza entegre edin (dosya yollarını kendi sunucunuza göre doğrulayın).
+# 3. Servisi yeniden yükleyin ve başlatın:
+#    sudo systemctl daemon-reload
+#    sudo systemctl restart cyber-llama-draft
+# 4. Durumunu kontrol edin:
+#    sudo systemctl status cyber-llama-draft
+# =====================================================================================
+
+[Unit]
+Description=Cyber AI Draft (Çırak) LLM Server - qwen2.5-0.5b
+After=network.target
+
+[Service]
+Type=simple
+# NOT: Kullanıcı adınız 'ubuntu' değilse (whoami komutuyla kontrol edin),
+# aşağıdaki User ve WorkingDirectory yollarını kendi kullanıcı adınızla değiştirin.
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+
+# -------------------------------------------------------------------------------------
+# CPU ÇEKİŞMESİ (CONTENTION) ÖNLEME KATMANI (ÖNEMLİ!)
+# -------------------------------------------------------------------------------------
+# Nice=10: Çırak modelin CPU önceliğini düşürür (0 normal, 19 en düşük önceliktir).
+# Bu sayede, Çırak (0.5B) ve Usta (14B) modelleri aynı anda çalışmaya başladığında,
+# Linux çekirdeği CPU zamanını öncelikli olarak Usta modele (Nice=0) ayırır.
+# Bu, kod seviyesinde paralel akış (erken tetikleme) açılsa bile Usta modelin
+# token üretim hızının (tokens per second) düşmesini ve kilitlenmeleri önler.
+Nice=10
+
+# ALTERNATİF (DAHA SERT) İZOLASYON: Çekirdek Sabitleme (Core Pinning)
+# Eğer 'Nice=10' çekişmeyi tamamen çözmezse, Çırak modeli sadece belirli CPU çekirdeklerine
+# sabitleyebilirsiniz. Örneğin, Çırak'ı 0 ve 1. çekirdeklere sabitlemek için ExecStart satırının
+# başına 'taskset -c 0,1' ekleyebilirsiniz.
+# Örnek (Yorum satırını kaldırmak isterseniz):
+# ExecStart=/usr/bin/taskset -c 0,1 /home/ubuntu/llama.cpp/build/bin/llama-server ...
+
+# -------------------------------------------------------------------------------------
+# PROMPT CACHING VE BAŞLATMA PARAMETRELERİ
+# -------------------------------------------------------------------------------------
+# --prompt-cache: Ortak sistem talimatları ve Shared Context (RAG/Web) doküman paketini
+#   disk üzerinde önbelleğe kaydeder. Aynı bağlam tekrar geldiğinde (örneğin usta eleştirisi
+#   sonrası 2. turda), llama.cpp bu token'ları yeniden hesaplamaz (0ms'ye yakın sürede işler).
+# --prompt-cache-all: Tüm prompt'u önbelleğe dahil eder.
+# -t 2: Çırak modelin sadece 2 CPU çekirdeği (thread) kullanmasını sağlar. Bu, 4 OCPU'lu
+#   sunucuda usta modele her zaman en az 2 çekirdeklik boş alan bırakılmasını garanti eder.
+ExecStart=/home/ubuntu/llama.cpp/build/bin/llama-server \
+  -m /home/ubuntu/models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+  --port 8088 \
+  --host 0.0.0.0 \
+  -c 4096 \
+  --prompt-cache /home/ubuntu/llama-cache/draft-cache.bin \
+  --prompt-cache-all \
+  -t 2
+
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+# =====================================================================================
+# PROMPT CACHING VE PERFORMANS NOTLARI:
+# -------------------------------------
+# 1. llama-cache Klasörünü Oluşturun:
+#    Servisi başlatmadan önce önbellek dosyasının yazılacağı klasörü oluşturun ve izin verin:
+#    mkdir -p /home/ubuntu/llama-cache
+#    chmod 755 /home/ubuntu/llama-cache
+#
+# 2. Usta Model (14B, Port 8082) İçin Öneri:
+#    Usta modelinizin kendi systemd servisinde veya başlatma scriptinde de benzer şekilde
+#    --prompt-cache /home/ubuntu/llama-cache/usta-cache.bin ve --prompt-cache-all
+#    parametrelerini kullanmanız, usta modelin de Shared Context'i her turda baştan
+#    hesaplamasını önleyerek sıcak başlangıç süresini (warm-start) 281ms seviyesine düşürür.
+#
+# 3. Thread Sayısı (-t):
+#    4 OCPU sunucuda, Çırak için '-t 2', Usta için ise '-t 4' (veya Nice=10 ile serbest)
+#    kullanılması en dengeli performansı sağlar.
+# =====================================================================================

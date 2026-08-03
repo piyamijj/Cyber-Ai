@@ -1,0 +1,101 @@
+# =====================================================================================
+# CYBER AI - USTA (ANA) MODEL SYSTEMD SERVİS ÖRNEĞİ (cyber-llama-usta.service)
+# =====================================================================================
+# Bu dosya, sunucunuzda (Oracle Cloud, 4 OCPU, GPU YOK) çalışan mevcut
+# 'Usta' (14B, port 8082) modelinizi prompt caching (önbellekleme) özelliğini sistematik
+# hale getirecek ve speculative decoding (spekülatif kod çözme) ile hızlandıracak şekilde
+# yapılandırmanız için bir REFERANS/DOKÜMANTASYON örneğidir.
+#
+# ÖNEMLİ NOT:
+# -----------
+# AI asistanı olarak, sunucunuzda 14B modelini şu an tam olarak nasıl başlattığınızı
+# (manuel bir kabuk komutu mu, ayrı bir systemd servisi mi, yoksa tmux/screen oturumu mu)
+# repoda buna dair bir dosya bulunmadığı için tam olarak bilemiyoruz.
+# Bu nedenle, eğer halihazırda bir systemd servisi kullanmıyorsanız bu dosyayı bir
+# geçiş rehberi olarak kullanmanızı; eğer kullanıyorsanız, buradaki '--prompt-cache',
+# '--prompt-cache-all' ve '--cache-reuse' bayraklarını mevcut başlatma komutunuza
+# eklemenizi öneririz. 14B sunucusunu nasıl başlattığınızdan emin değilseniz lütfen bize bildirin.
+# =====================================================================================
+
+[Unit]
+Description=Cyber AI Usta (Ana) LLM Server - qwen2.5-14b, speculative decoding
+After=network.target
+
+[Service]
+Type=simple
+# NOT: Kullanıcı adınız 'ubuntu' değilse (whoami komutuyla kontrol edin),
+# aşağıdaki User ve WorkingDirectory yollarını kendi kullanıcı adınızla değiştirin.
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+
+# -------------------------------------------------------------------------------------
+# CPU ÖNCELİĞİ VE İZOLASYON
+# -------------------------------------------------------------------------------------
+# Usta model için 'Nice=' değeri tanımlanmamıştır (varsayılan 0/normal öncelikte kalır).
+# Bu bilinçli bir tercihtir: Çırak model (Nice=10) düşük öncelikli çalışırken,
+# Linux çekirdeği CPU zamanını öncelikli olarak Usta modele ayırır. Böylece iki model
+# aynı anda çalışsa bile Usta modelin (14B) pürüzsüzlüğü ve hızı korunur.
+#
+# ALTERNATİF (DAHA SERT) İZOLASYON: Çekirdek Sabitleme (Core Pinning)
+# Eğer Çırak modeli taskset ile 0 ve 1. çekirdeklere sabitlediyseniz, Usta modeli de
+# 2 ve 3. çekirdeklere sabitleyerek CPU çekişmesini tamamen sıfırlayabilirsiniz.
+# Örnek (Yorum satırını kaldırmak isterseniz):
+# ExecStart=/usr/bin/taskset -c 2,3 /home/ubuntu/llama.cpp/build/bin/llama-server ...
+
+# -------------------------------------------------------------------------------------
+# PROMPT CACHING VE SPEKÜLATİF KOD ÇÖZME PARAMETRELERİ
+# -------------------------------------------------------------------------------------
+# --model-draft: Spekülatif kod çözme (speculative decoding) için kullanılacak taslak modeli
+#   belirtir. Burada 0.5B model dosyasını belirtiyoruz.
+#   DİKKAT: Bu spekülatif kod çözme kullanımı, yeni mimarideki port 8088'de çalışan bağımsız
+#   'Çırak' sohbet sürecinden tamamen farklı ve bağımsızdır. Aynı model dosyası (.gguf)
+#   sunucuda iki farklı amaçla iki ayrı süreç tarafından yüklenir.
+# --prompt-cache: Ortak sistem talimatları ve Shared Context (RAG/Web) doküman paketini
+#   disk üzerinde önbelleğe kaydeder.
+# --prompt-cache-all: Tüm prompt'u önbelleğe dahil eder.
+# --cache-reuse: Önceki turlardan kalan KV-cache parçalarını, prompt kısmen değişse bile
+#   (örneğin usta eleştirisi eklendiğinde) akıllıca yeniden kullanır.
+# -t 4: Usta modelin 4 CPU çekirdeğinin tamamını (thread) kullanmasını sağlar.
+ExecStart=/home/ubuntu/llama.cpp/build/bin/llama-server \
+  -m /home/ubuntu/models/qwen2.5-14b.gguf \
+  --model-draft /home/ubuntu/models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+  --port 8082 \
+  --host 0.0.0.0 \
+  -c 8192 \
+  --prompt-cache /home/ubuntu/llama-cache/usta-cache.bin \
+  --prompt-cache-all \
+  --cache-reuse 256 \
+  -t 4
+
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+# =====================================================================================
+# PROMPT CACHING VE SİNERJİ NOTLARI:
+# ----------------------------------
+# 1. Shared Context ile Mükemmel Uyum:
+#    Yeni mimaride 'collab_orchestrator.py' içindeki 'SharedContext.to_system_blocks()'
+#    fonksiyonu, tek bir kullanıcı isteğinin tüm turları (Çırak Tur 1, Usta Tur 1, Çırak Tur 2,
+#    Usta Tur 2) boyunca tamamen AYNI sistem mesajı bloklarını (RAG ve Web Arama verileri)
+#    üretir. Bu byte-birebir aynı olan ön ek (prefix), '--prompt-cache' ve '--cache-reuse'
+#    özelliklerinin tam olarak yararlanması için tasarlanmıştır. Bu sayede 2. turda usta model
+#    bağlamı baştan hesaplamaz, sıcak başlangıç (warm-start) süresi 281ms seviyesine düşer.
+#
+# 2. --cache-reuse Parametresi Hakkında:
+#    '--cache-reuse' bayrağı llama.cpp'nin güncel sürümlerinde bulunan çok güçlü bir özelliktir.
+#    Eğer servisi başlatırken "unknown argument" hatası alırsanız, sunucunuzdaki llama.cpp
+#    sürümü eski olabilir. Bu durumda:
+#      a) Bu bayrağı komuttan kaldırıp sadece '--prompt-cache' ile devam edebilirsiniz.
+#      b) Veya llama.cpp klasörünüze gidip güncelleyerek yeniden derleyebilirsiniz:
+#         git pull && cmake --build build --config Release -j$(nproc)
+#
+# 3. llama-cache Klasörünü Oluşturun:
+#    Önbellek dosyasının yazılacağı klasörün mevcut olduğundan emin olun:
+#    mkdir -p /home/ubuntu/llama-cache
+#    chmod 755 /home/ubuntu/llama-cache
+# =====================================================================================

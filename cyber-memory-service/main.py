@@ -8,12 +8,18 @@ import uuid
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import uvicorn
 import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 from sentence_transformers import SentenceTransformer
+
+# YENİ MİMARİ: Streaming Çırak-Usta (Draft-Critique) işbirlikçi boru hattı.
+# Bu modül; Shared Context (tek seferlik RAG), asyncio.Queue tabanlı canlı streaming pipe,
+# kod seviyesinde kesin max-tur sınırı ve approval_token ile early-exit mantığını içerir.
+import collab_orchestrator as collab
 
 # 1. LOGGING AYARLARI
 # Servisin çalışmasını ve arka plandaki kararları takip edebilmek için loglama yapısını kuruyoruz.
@@ -37,6 +43,11 @@ LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://localhost:8082")
 # tamamen bağımsızdır — kaynak çekişmesine girmez, bu yüzden ana sohbet gecikmesini artırmaz.
 DRAFT_LLAMA_SERVER_URL = os.getenv("DRAFT_LLAMA_SERVER_URL", "http://localhost:8088")
 EMBEDDING_MODEL_NAME = "BAAI/bge-base-en-v1.5"
+
+# YENİ MİMARİ: Çırak-Usta modellerin gerçek model dosya adları (llama-server'a /v1/chat/completions
+# çağrılırken "model" alanında gönderilir). Ortam değişkeninden override edilebilir.
+DRAFT_MODEL_NAME = os.getenv("DRAFT_MODEL_NAME", "models/qwen2.5-0.5b-instruct-q4_k_m.gguf")
+USTA_MODEL_NAME = os.getenv("USTA_MODEL_NAME", "models/qwen2.5-14b.gguf")
 
 # /decide endpoint'i için İKİNCİ SAVUNMA KATMANI: küçük model (0.5B) HAYIR derse bile, mesajda
 # bu belirgin anahtar kelimelerden biri geçiyorsa karar EVET'e çevrilir. Küçük modeller bazen
@@ -664,6 +675,159 @@ async def remember_conversation(request: RememberRequest):
     except Exception as e:
         logger.error(f"Hafıza kaydı işlemi sırasında hata: {e}", exc_info=True)
         return RememberResponse(saved=False, reason=f"Sistem hatası: {str(e)}")
+
+# =====================================================================================
+# YENİ MİMARİ: STREAMING ÇIRAK-USTA (DRAFT-CRITIQUE) İŞBİRLİKÇİ BORU HATTI
+# =====================================================================================
+# Bu bölüm, kullanıcının doğrudan taleplerine göre inşa edilen yeni mimariyi uygular:
+#   1. Shared Context: RAG + web search bir kez çekilir, hem çırak hem usta bunu okur.
+#   2. Streaming pipe: Çırak (0.5B) taslak üretirken chunk'lar asyncio.Queue üzerinden
+#      usta (14B) modele canlı akıtılır (bkz. collab_orchestrator.py).
+#   3. Kod seviyesinde kesin max-tur sınırı (COLLAB_MAX_REVISION_TURNS, varsayılan 2).
+#   4. approval_token ile early-exit: usta "APPROVAL_OK" derse döngü ANINDA kesilir.
+#
+# NOT (CPU ÇEKİŞMESİ - dürüst uyarı): Sunucuda GPU yok, 4 OCPU var. İki modeli aynı anda
+# tam paralel token üretecek şekilde çalıştırmak CPU çekirdeklerini paylaştırır. Bu yüzden
+# varsayılan davranış (COLLAB_EARLY_START_CHARS=0) SIRALI çalışır: çırak taslağı bitirir,
+# usta ardından değerlendirir. Gerçek paralel/iç-içe (interleaved) mod isteğe bağlı olarak
+# COLLAB_EARLY_START_CHARS>0 ile açılabilir, ancak ölçümlerimiz (bkz. rapor) CPU çekişmesi
+# nedeniyle bunun net bir kazanç sağlamadığını gösteriyor — ayrıntılar README'de.
+
+
+class CollabRequest(BaseModel):
+    query: str
+    # Vercel proxy'sinden gelen tam konuşma geçmişi (opsiyonel; yoksa sadece query kullanılır)
+    conversation_history: Optional[List[dict]] = None
+
+
+async def _memory_search_adapter(query: str) -> dict:
+    """collab_orchestrator.fetch_shared_context için /search endpoint'inin mantığını
+    doğrudan (HTTP round-trip yapmadan, aynı process içinde) çağıran adapter."""
+    try:
+        response = await search_memory(SearchRequest(query=query, top_k=2))
+        return response.model_dump()
+    except Exception as e:
+        logger.error(f"Shared Context için RAG araması başarısız: {e}")
+        return {"results": [], "found": False}
+
+
+async def _web_search_adapter(query: str) -> dict:
+    """collab_orchestrator.fetch_shared_context için /web_search endpoint'inin mantığını
+    doğrudan (aynı process içinde) çağıran adapter."""
+    try:
+        response = await web_search(WebSearchRequest(query=query, max_results=2))
+        return response.model_dump()
+    except Exception as e:
+        logger.error(f"Shared Context için web araması başarısız: {e}")
+        return {"results": [], "found": False}
+
+
+async def _decide_adapter(query: str) -> dict:
+    """collab_orchestrator.fetch_shared_context için /decide endpoint'inin mantığını
+    doğrudan (aynı process içinde) çağıran adapter."""
+    try:
+        response = await decide_needs_realtime_info(DecideRequest(query=query))
+        return response.model_dump()
+    except Exception as e:
+        logger.error(f"Shared Context için /decide çağrısı başarısız: {e}")
+        return {"needs_realtime_info": True, "search_query": query, "fallback_used": True}
+
+
+@app.post("/collab_stream")
+async def collab_stream(request: CollabRequest):
+    """
+    YENİ MİMARİ ANA ENDPOINT'İ: Streaming Çırak-Usta işbirlikçi cevap üretimi.
+
+    Akış:
+      1. Shared Context bir kez çekilir (RAG + gerekiyorsa web search).
+      2. run_collaborative_pipeline çağrılır: çırak taslak üretir, usta değerlendirir,
+         approval_token görülürse ANINDA break, yoksa en fazla MAX_REVISION_TURNS tur döner.
+      3. Sonuç, tarayıcıya Server-Sent Events (SSE) formatında akıtılır:
+         - Her turun çırak taslağı "draft" event'i olarak,
+         - Usta eleştirisi/nihai cevabı "critique" event'i olarak,
+         - Pipeline bitince "final" event'i (nihai cevap metni) ve zamanlama bilgisi gönderilir.
+
+    Bu endpoint, mevcut /decide + /search + /web_search akışının YERİNE GEÇMEK ÜZERE
+    tasarlanmıştır (route.ts bu endpoint'i çağıracak şekilde güncellenmelidir). Eski
+    endpoint'ler geriye dönük uyumluluk ve olası rollback için olduğu gibi bırakıldı.
+    """
+    if not request.query or not request.query.strip():
+        raise HTTPException(status_code=400, detail="query alanı boş olamaz.")
+
+    # Gelen conversation_history her öğesinin role/content içerdiğini doğruluyoruz;
+    # aksi halde 400 ile net bir hata döndürüyoruz (pipeline içinde geç ve belirsiz bir
+    # runtime hatası almak yerine).
+    if request.conversation_history is not None:
+        for i, item in enumerate(request.conversation_history):
+            if not isinstance(item, dict) or "role" not in item or "content" not in item:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"conversation_history[{i}] geçersiz: 'role' ve 'content' alanları gerekli."
+                )
+
+    conversation_messages = request.conversation_history or [
+        {"role": "user", "content": request.query}
+    ]
+
+    async def event_generator():
+        # SSE formatında bir event gönderen yardımcı fonksiyon
+        def sse(event_name: str, data: dict) -> str:
+            return f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        try:
+            # 1. ADIM: Shared Context'i BİR SEFERDE çek (RAG + web search)
+            shared_context = await collab.fetch_shared_context(
+                user_query=request.query,
+                memory_search_fn=_memory_search_adapter,
+                web_search_fn=_web_search_adapter,
+                decide_fn=_decide_adapter
+            )
+            yield sse("shared_context_ready", {
+                "rag_used": bool(shared_context.rag_text),
+                "web_used": bool(shared_context.web_text),
+                "decide_meta": shared_context.decide_meta
+            })
+
+            # 2. ADIM: Çırak-Usta işbirlikçi boru hattını çalıştır
+            request_timeout = httpx.Timeout(connect=10.0, read=200.0, write=10.0, pool=10.0)
+            async with httpx.AsyncClient(timeout=request_timeout) as client:
+                pipeline_result = await collab.run_collaborative_pipeline(
+                    client=client,
+                    draft_url=DRAFT_LLAMA_SERVER_URL,
+                    usta_url=LLAMA_SERVER_URL,
+                    draft_model_name=DRAFT_MODEL_NAME,
+                    usta_model_name=USTA_MODEL_NAME,
+                    shared_context=shared_context,
+                    conversation_messages=conversation_messages
+                )
+
+            # 3. ADIM: Her turun sonucunu (taslak + eleştiri + zamanlama) sırayla akıt
+            for round_result in pipeline_result["rounds"]:
+                yield sse("draft", {
+                    "turn_index": round_result["turn_index"],
+                    "text": round_result["draft_text"]
+                })
+                yield sse("critique", {
+                    "turn_index": round_result["turn_index"],
+                    "text": round_result["critique_text"],
+                    "approved": round_result["approved"],
+                    "timing": round_result["timing"]
+                })
+
+            # 4. ADIM: Nihai cevabı ve pipeline özetini gönder
+            yield sse("final", {
+                "text": pipeline_result["final_answer"],
+                "approved_early": pipeline_result["approved_early"],
+                "turns_used": pipeline_result["turns_used"],
+                "total_pipeline_seconds": pipeline_result["total_pipeline_seconds"]
+            })
+
+        except Exception as e:
+            logger.error(f"/collab_stream sırasında hata: {e}", exc_info=True)
+            yield sse("error", {"message": str(e)})
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 
 # 8. DOĞRUDAN ÇALIŞTIRMA DESTEĞİ
 if __name__ == "__main__":
