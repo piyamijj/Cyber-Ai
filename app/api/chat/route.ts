@@ -26,27 +26,58 @@ export const maxDuration = 290;
 const DEFAULT_UPSTREAM_URL = "http://79.76.63.191:8082";
 const DEFAULT_MEMORY_SERVICE_URL = "http://79.76.63.191:8083";
 
-// Bu kelime/kalıplar bir sorunun GÜNCEL/ZAMANA-DUYARLI bir konu (haber, güncel olay,
-// "şu an" geçerli bir bilgi) hakkında olabileceğine işaret eder. Basit bir anahtar kelime
-// kontrolü kullanıyoruz (modele ayrı bir "buna web araması gerekir mi?" sorusu sormak yerine) —
-// bu ekstra bir LLM çağrısı/gecikme eklemeden makul bir doğrulukla çalışır.
-const TIME_SENSITIVE_KEYWORDS = [
-  "güncel", "bugün", "bu gün", "şu an", "şu anda", "son durum", "son dakika",
-  "haber", "haberler", "ne oldu", "ne durumda", "kim oldu", "kim kazandı",
-  "seçim", "kriz", "bu hafta", "bu ay", "bu yıl", "geçen hafta", "dün",
-  "yeni açıklama", "son gelişme", "kaç oldu", "fiyatı ne", "kuru ne",
-  "cumhurbaşkanı", "başbakan", "hangi parti", "yeni parti"
-];
-
 /**
- * Kullanıcının sorusunun güncel/zamana-duyarlı bir konu hakkında olup olmadığını
- * basit bir anahtar kelime kontrolüyle tahmin eder. Kesin bir bilim değildir — amaç,
- * her soruda web araması yapıp gereksiz gecikme eklemeden, gerçekten güncel bilgi
- * gerektirebilecek soruları makul bir doğrulukla yakalamaktır.
+ * "ÇIRAK-USTA" KARAR MİMARİSİ
+ * ---------------------------
+ * Eskiden burada basit bir anahtar kelime taraması (isLikelyTimeSensitiveQuery) vardı.
+ * Hem isabetsizdi (birçok güncel soruyu kaçırıyor ya da alakasız sorularda gereksiz
+ * yere tetikleniyordu) hem de tetiklendiğinde RAG+Tavily sonucu büyük modele (14B, CPU'da
+ * yavaş) sistem mesajı olarak enjekte edilse bile büyük model bunu sık sık görmezden gelip
+ * "güncel veri veremem" diyerek uydurma cevaplar üretiyordu.
+ *
+ * Yeni mimaride karar, KÜÇÜK bir modele ("çırak" — qwen2.5-0.5b, ayrı bir llama-server
+ * sürecinde, ayrı bir portta, ana modelden bağımsız çalışır) verdiriliyor. Bu model hafıza
+ * servisindeki (main.py) /decide endpoint'i üzerinden çağrılıyor; SADECE EVET/HAYIR üretecek
+ * şekilde kısıtlanmış, max_tokens düşük tutulmuş, bu yüzden tipik olarak 1-2 saniyede döner.
+ * Küçük model ayrı bir süreçte olduğu için ana ("usta") modelle kaynak çekişmesine girmez.
+ *
+ * HAYIR ise: RAG ve web search TAMAMEN atlanır, istek doğrudan ana modele gider — gecikme
+ * neredeyse sıfıra iner.
+ * EVET ise: RAG + web search (Tavily) çalıştırılır, sonuç ana modele GÜÇLÜ ve ZORLAYICI bir
+ * sistem talimatıyla iletilir (bkz. aşağıdaki webSearchContext hazırlığı).
  */
-function isLikelyTimeSensitiveQuery(userMessage: string): boolean {
-  const text = userMessage.toLowerCase();
-  return TIME_SENSITIVE_KEYWORDS.some((keyword) => text.includes(keyword));
+
+// Çırak (küçük) modelin karar servisi başarısız olur/zaman aşımına uğrarsa güvenli tarafta
+// kalıyoruz: eskisi gibi RAG+web search çalışsın (needsRealtimeInfo=true varsayılır).
+async function decideNeedsRealtimeInfo(userMessage: string, memoryServiceUrl: string): Promise<boolean> {
+  const controller = new AbortController();
+  // Çırak model ayrı bir süreçte, düşük max_tokens ile çalıştığı için hızlı olmalı.
+  // Yine de ağ/servis gecikmesine karşı makul ama sıkı bir zaman aşımı koyuyoruz.
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const response = await fetch(`${memoryServiceUrl}/decide`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: userMessage }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      console.warn(`/decide çağrısı hata döndürdü: ${response.status}. Güvenli taraf: EVET (RAG+web search çalışacak).`);
+      return true;
+    }
+
+    const data = await response.json();
+    console.log(`Çırak-usta kararı: ${data.needs_realtime_info ? "EVET (RAG+web search çalışacak)" : "HAYIR (RAG+web search atlanacak)"} | Çırak çıktısı: '${data.raw_output}'${data.fallback_used ? " [FALLBACK]" : ""}`);
+    return data.needs_realtime_info !== false; // beklenmeyen alan/tip durumunda da güvenli tarafta kal
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+    console.warn("/decide adımı atlandı veya zaman aşımına uğradı, güvenli taraf: EVET (RAG+web search çalışacak):", error.message || error);
+    return true;
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -84,11 +115,20 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // 3.5. ADIM: ÇIRAK-USTA KARAR ADIMI
+    // RAG ve web search'ü çalıştırıp çalıştırmayacağımıza küçük ("çırak") model karar verir.
+    // HAYIR ise aşağıdaki iki blok (RAG + web search) TAMAMEN atlanır — istek doğrudan ana
+    // modele gider, gecikme neredeyse sıfıra iner. EVET ise ikisi de normal şekilde çalışır.
+    let needsRealtimeInfo = false;
+    if (latestUserMessage) {
+      needsRealtimeInfo = await decideNeedsRealtimeInfo(latestUserMessage, memoryServiceUrl);
+    }
+
     // 4. ADIM A: RAG (Geçmiş Hafıza) Araması
     // Kullanıcıyı bekletmemek için bu aramaya maksimum 4 saniyelik bir zaman aşımı (timeout) koyuyoruz.
     // Eğer hafıza servisi kapalıysa veya yavaşsa, RAG adımı sessizce atlanır ve sohbet normal şekilde devam eder.
     let ragContext: string | null = null;
-    if (latestUserMessage) {
+    if (needsRealtimeInfo && latestUserMessage) {
       const ragController = new AbortController();
       const ragTimeoutId = setTimeout(() => ragController.abort(), 4000);
 
@@ -116,21 +156,19 @@ export async function POST(req: NextRequest) {
         clearTimeout(ragTimeoutId);
         console.warn("Hafıza araması (RAG) adımı atlandı veya zaman aşımına uğradı:", ragError.message || ragError);
       }
+    } else if (!needsRealtimeInfo) {
+      console.log("Çırak-usta kararı HAYIR: RAG adımı atlandı.");
     }
 
     // 4.5. ADIM A2: Web Araması (Güncel/Zamana-Duyarlı Sorular İçin)
-    // Kullanıcının sorusu güncel bir olay/haber gibi görünüyorsa (basit anahtar kelime kontrolü ile
-    // tespit edilir), gerçek zamanlı bir web araması yapıyoruz. Bu sonuçlar SADECE bu cevap için
-    // kullanılır — hafızaya (Qdrant'a) KESİNLİKLE kaydedilmez, çünkü güncel bilgi zamanla bayatlar
-    // ve kalıcı olarak saklanırsa ileride yanıltıcı olur. Kullanıcıyı bekletmemek için kısa bir
-    // zaman aşımı koyuyoruz; başarısız olursa sessizce atlanır, sohbet normal devam eder.
+    // Küçük model (çırak) bu sorunun güncel/gerçek-zamanlı bilgi gerektirdiğine karar verdiyse
+    // (needsRealtimeInfo === true), gerçek zamanlı bir web araması yapıyoruz. Bu sonuçlar SADECE
+    // bu cevap için kullanılır — hafızaya (Qdrant'a) KESİNLİKLE kaydedilmez, çünkü güncel bilgi
+    // zamanla bayatlar ve kalıcı olarak saklanırsa ileride yanıltıcı olur. Kullanıcıyı bekletmemek
+    // için kısa bir zaman aşımı koyuyoruz; başarısız olursa sessizce atlanır, sohbet normal devam eder.
     let webSearchContext: string | null = null;
-    // GEÇİCİ OLARAK DEVRE DIŞI: Web arama entegrasyonu bozuk/kodlaması hatalı sonuçlar
-    // üretebiliyordu (DuckDuckGo scraping çıktısı temizlenmeden modele veriliyordu) ve
-    // ekstra gecikmeye neden oluyordu. Kod sağlamlaştırılıp iyice test edilene kadar
-    // "false &&" ile bu adımı tamamen atlıyoruz — normal sohbet deneyimi bundan etkilenmez.
     const WEB_SEARCH_ENABLED = true;
-    if (WEB_SEARCH_ENABLED && latestUserMessage && isLikelyTimeSensitiveQuery(latestUserMessage)) {
+    if (WEB_SEARCH_ENABLED && needsRealtimeInfo && latestUserMessage) {
       const webSearchController = new AbortController();
       const webSearchTimeoutId = setTimeout(() => webSearchController.abort(), 6000);
 
@@ -161,7 +199,19 @@ export async function POST(req: NextRequest) {
               const webResults = validResults
                 .map((r: any) => `- ${r.title}: ${r.snippet}`)
                 .join("\n");
-              webSearchContext = `Aşağıda bu soruyla ilgili güncel web arama sonuçları var. Bu bilgiler gerçek zamanlıdır, cevabında kullanabilirsin:\n${webResults}`;
+              // ÖNEMLİ: Bu talimat kasıtlı olarak sert ve zorlayıcı yazıldı. Önceki sürümde
+              // ("Bu bilgiler gerçek zamanlıdır, cevabında kullanabilirsin") büyük model bu
+              // sonuçları sık sık görmezden gelip "güncel veri sağlayamam" diyerek uydurma
+              // rakamlar/cevaplar üretiyordu. Bu yüzden burada modele seçenek bırakmıyoruz.
+              webSearchContext =
+                "SANA AŞAĞIDA GERÇEK ZAMANLI, GÜNCEL WEB ARAMA SONUÇLARI VERİLDİ. " +
+                "Bu bilgiyi MUTLAKA kullanarak cevap ver. ASLA 'güncel veri sağlayamam', " +
+                "'gerçek zamanlı bilgiye erişimim yok' veya benzeri bir cevap VERME — " +
+                "aşağıdaki sonuçlar sana gerçek zamanlı arama ile sağlanmış GÜNCEL VE GEÇERLİ " +
+                "bilgidir. ASLA kendi belleğinden uydurma rakam/tarih/isim üretme; SADECE " +
+                "aşağıda verilen sonuçlardaki bilgiyi kullan. Sonuçlar arasında doğrudan cevap " +
+                "yoksa, en yakın/ilgili bilgiyi ver ve hangi kaynaktan geldiğini belirt.\n\n" +
+                `Web arama sonuçları:\n${webResults}`;
               console.log("Web arama bağlamı başarıyla enjekte edildi.");
             } else {
               console.warn("Web arama sonuçlarından bazıları doğrulamayı geçemedi, güvenlik için tüm bağlam atlandı.");
@@ -180,7 +230,7 @@ export async function POST(req: NextRequest) {
     // Cyber AI kimliğini tanımlayan ana sistem mesajı
     const identitySystemMessage = {
       role: "system",
-      content: "Sen Cyber AI'sın (veya kısaca Cyber). Oracle Cloud üzerinde çalışan, yüksek performanslı ve özel bir yapay zeka asistanısın. Kim olduğun sorulduğunda asla 'Qwen' veya 'Alibaba' olduğunu söyleme; kendini her zaman 'Cyber AI' olarak tanıt. Türkçe konuş."
+      content: "Sen Cyber AI'sın (veya kısaca Cyber). Oracle Cloud üzerinde çalışan, yüksek performanslı ve özel bir yapay zeka asistanısın. Kim olduğun sorulduğunda asla 'Qwen' veya 'Alibaba' olduğunu söyleme; kendini her zaman 'Cyber AI' olarak tanıt. Türkçe konuş. Eğer sana ayrı bir sistem mesajıyla güncel web arama sonuçları verilmişse, bunları mutlaka gerçek ve geçerli bilgi olarak kabul et; 'güncel veriye erişimim yok' gibi bir çelişkili cevap verme — bu kısıtlama SADECE web arama sonucu verilmediği durumlar için geçerlidir."
     };
 
     // Mesaj listesini oluşturuyoruz: [Kimlik Sistem Mesajı, RAG Sistem Mesajı (varsa),
