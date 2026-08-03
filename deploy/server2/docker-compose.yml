@@ -1,0 +1,97 @@
+# =====================================================================================
+# CYBER AI - SUNUCU 2 (DAĞITIK MİMARİ) DOCKER COMPOSE YAPILANDIRMASI
+# =====================================================================================
+# Bu dosya, yeni ikinci sunucunuzda (Server 2, 79.76.38.185, 4 OCPU, 64GB RAM, GPU YOK)
+# çalıştırılmak üzere tasarlanmıştır.
+#
+# DAĞITIK MİMARİ AVANTAJI:
+# ------------------------
+# - Çırak model (0.5B) ve Qdrant Vektör Veritabanı bu ikinci sunucuya taşınarak,
+#   Sunucu 1'deki (79.76.63.191) 14B Usta modelin CPU üzerindeki yükü tamamen sıfırlanır.
+# - Usta model artık Sunucu 1'in 4 OCPU çekirdeğini tek başına ve tam verimle kullanır.
+# - İki sunucu da aynı Oracle Cloud Stockholm bölgesinde olduğu için aralarındaki
+#   ağ gecikmesi (network latency) minimum düzeydedir (~1-3ms), bu da dağıtık mimarinin
+#   getirdiği CPU rahatlaması yanında ihmal edilebilir bir ağ maliyetidir.
+#
+# ENTEGRASYON NOTU:
+# -----------------
+# - Sunucu 1'de çalışan RAG/Hafıza servisi (cyber-memory-service, main.py) yerinde kalır.
+# - Sadece Sunucu 1'deki servis yapılandırmasında (cyber-memory.service) ortam değişkenleri
+#   güncellenerek Qdrant ve Çırak model adresleri Sunucu 2'nin IP'sine yönlendirilir:
+#     Environment=QDRANT_HOST=79.76.38.185
+#     Environment=DRAFT_LLAMA_SERVER_URL=http://79.76.38.185:8088
+# =====================================================================================
+
+version: '3.8'
+
+services:
+  # -----------------------------------------------------------------------------------
+  # 1. QDRANT VEKTÖR VERİTABANI SERVİSİ
+  # -----------------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: cyber-qdrant
+    # GÜVENLİK UYARISI:
+    # -----------------
+    # Portların dış dünyaya tamamen açık (0.0.0.0) olması güvenlik riski oluşturur.
+    # Bu portların sadece Sunucu 1'in (79.76.63.191) IP adresinden gelen isteklere izin verecek
+    # şekilde Oracle Cloud Security List (Güvenlik Listesi) veya sunucu içi iptables/ufw
+    # üzerinden sınırlandırılması KESİNLİKLE önerilir (bkz. kurulum rehberi README).
+    ports:
+      - "6333:6333" # REST API portu (Hafıza servisi buraya bağlanacak)
+      - "6334:6334" # gRPC portu
+    volumes:
+      # Vektör verilerinin kalıcı olması için named volume kullanıyoruz.
+      # Bu klasör silinirse tüm geçmiş RAG hafızası kaybolur!
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+    # Qdrant'ın sağlıklı çalışıp çalışmadığını kontrol eden mekanizma
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz || wget --no-verbose --tries=1 --spider http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # -----------------------------------------------------------------------------------
+  # 2. ÇIRAK (DRAFT) LLAMA-SERVER SÜRECİ
+  # -----------------------------------------------------------------------------------
+  cyber-llama-draft:
+    build:
+      context: .
+      dockerfile: Dockerfile.draft-llama
+    container_name: cyber-llama-draft
+    ports:
+      - "8088:8088" # Çırak modelin API portu
+    volumes:
+      # Model dosyasının (.gguf) bulunacağı yerel klasörü konteynere bağlıyoruz (Salt Okunur)
+      - ./models:/models:ro
+      # Prompt cache (önbellek) dosyasının kalıcı olması için yerel klasörü bağlıyoruz
+      - ./llama-cache:/llama-cache
+    # PARAMETRE AÇIKLAMALARI:
+    # -----------------------
+    # -m /models/qwen2.5-0.5b-instruct-q4_k_m.gguf: Çırak model dosyasının konteyner içi yolu.
+    #   Eğer farklı bir model dosyası kullanacaksanız, bu satırdaki dosya adını güncelleyin.
+    # -t 2: Çırak modelin sadece 2 CPU çekirdeği (thread) kullanmasını sağlar.
+    #   Sunucu 2'de aynı zamanda Qdrant veritabanı da çalışacağı için, çırak modelin tüm CPU'yu
+    #   (4 çekirdeği) sömürmesini engelleyerek Qdrant'a nefes alacak alan bırakıyoruz.
+    # --prompt-cache /llama-cache/draft-cache.bin: Önbellek dosyasının yazılacağı yol.
+    # --prompt-cache-all: Tüm prompt'u önbelleğe dahil eder.
+    command: >
+      llama-server 
+      -m /models/qwen2.5-0.5b-instruct-q4_k_m.gguf 
+      --port 8088 
+      --host 0.0.0.0 
+      -c 4096 
+      --prompt-cache /llama-cache/draft-cache.bin 
+      --prompt-cache-all 
+      -t 2
+    restart: unless-stopped
+    # Qdrant ile doğrudan bir kod bağımlılığı yoktur (Hafıza servisi ikisiyle de ayrı ayrı konuşur),
+    # ancak düzenli bir başlangıç sırası için compose seviyesinde bağımlılık tanımlıyoruz.
+    depends_on:
+      - qdrant
+
+volumes:
+  # Qdrant verilerinin kalıcı olarak saklanacağı Docker birimi
+  qdrant_data:
+    name: cyber_qdrant_data

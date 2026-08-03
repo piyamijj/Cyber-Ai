@@ -1,0 +1,84 @@
+# =====================================================================================
+# CYBER AI - SUNUCU 2 (DRAFT/ÇIRAK) LLAMA-SERVER DOCKERFILE
+# =====================================================================================
+# Bu Dockerfile, yeni ikinci sunucunuzda (Server 2, 79.76.38.185, GPU YOK, 4 OCPU)
+# çalışacak olan "Çırak" (0.5B, port 8088) modelinin llama-server sürecini
+# Dockerize etmek için tasarlanmıştır.
+#
+# MİMARİ DETAY:
+# -------------
+# - Bu imaj SADECE CPU-only (CUDA desteksiz) olarak derlenir. Sunucu 2'de GPU olmadığı
+#   için en optimize CPU derlemesi (Release, -O3) hedeflenmiştir.
+# - Çok aşamalı (multi-stage) derleme kullanılarak derleme araçları (gcc, cmake vb.)
+#   nihai imajdan temizlenir, böylece imaj boyutu minimumda tutulur.
+# - Model dosyaları (.gguf) imajın içine gömülmez; bunun yerine dışarıdan bir volume
+#   olarak bağlanır (mount edilir). Bu sayede imaj boyutu şişmez ve model güncellemeleri
+#   konteyneri yeniden derlemeden yapılabilir.
+# =====================================================================================
+
+# -------------------------------------------------------------------------------------
+# 1. DERLEME AŞAMASI (BUILD STAGE)
+# -------------------------------------------------------------------------------------
+FROM ubuntu:24.04 AS build
+
+# Derleme için gerekli paketleri yüklüyoruz
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    libcurl4-openssl-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# llama.cpp reposunu klonluyoruz
+WORKDIR /app
+RUN git clone --depth 1 https://github.com/ggerganov/llama.cpp.git
+
+# NOT: Belirli bir kararlı sürüme (tag/commit) sabitlemek isterseniz,
+# aşağıdaki satırların yorumunu kaldırıp kullanabilirsiniz:
+# WORKDIR /app/llama.cpp
+# RUN git fetch --tags && git checkout b3500 # Örnek bir tag
+
+# Derleme dizinini oluşturup CMake ile CPU-only (Release) derlemesini başlatıyoruz
+WORKDIR /app/llama.cpp/build
+RUN cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_CUDA=OFF \
+    -DLLAMA_CURL=ON \
+    && cmake --build . --config Release -j$(nproc) --target llama-server
+
+# -------------------------------------------------------------------------------------
+# 2. ÇALIŞMA AŞAMASI (RUNTIME STAGE)
+# -------------------------------------------------------------------------------------
+FROM ubuntu:24.04
+
+# Çalışma zamanı için gerekli minimal kütüphaneleri yüklüyoruz (derleme araçları yok)
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \
+    libcurl4 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Derleme aşamasında üretilen 'llama-server' ikili dosyasını kopyalıyoruz
+COPY --from=build /app/llama.cpp/build/bin/llama-server /usr/local/bin/llama-server
+
+# Model dosyalarının bağlanacağı (mount) dizini oluşturuyoruz
+RUN mkdir -p /models /llama-cache
+
+# Çırak modelin varsayılan portunu dış dünyaya bildiriyoruz
+EXPOSE 8088
+
+# Çalışma dizinini ayarlıyoruz
+WORKDIR /
+
+# NOT (Tasarım Kararı):
+# ---------------------
+# Konteyner başlatılırken kullanılacak parametreler (model yolu, port, thread sayısı vb.)
+# bu Dockerfile içinde sabitlenmemiştir. Bunun yerine, docker-compose.yml dosyasındaki
+# 'command:' alanı üzerinden dinamik olarak yönetilmesi tercih edilmiştir. Bu sayede
+# kullanıcı imajı yeniden derlemek zorunda kalmadan sadece compose dosyasını düzenleyerek
+# tüm parametreleri (örn. prompt-cache yollarını) değiştirebilir.
+#
+# Aşağıdaki CMD sadece bir fallback (varsayılan) olarak tanımlanmıştır.
+CMD ["llama-server", "--help"]

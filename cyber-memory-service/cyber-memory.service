@@ -23,10 +23,19 @@ StandardOutput=journal
 StandardError=journal
 
 # Cevre Degiskenleri
-Environment=QDRANT_HOST=localhost
+#
+# DAGITIK MIMARI GUNCELLEMESI (Sunucu 2'ye tasima sonrasi):
+# -----------------------------------------------------------
+# Asagidaki QDRANT_HOST ve DRAFT_LLAMA_SERVER_URL degerleri, Qdrant ve Cirak modelin
+# Sunucu 2'ye (79.76.38.185) tasinmasindan SONRA guncellenmistir. Eger henuz tasima
+# yapmadiysaniz (Qdrant/Cirak hala bu sunucuda calisiyorsa), bu iki satiri
+# "localhost" olarak GERI ALIN, aksi halde hafiza servisi yanlis adrese baglanmaya calisir.
+Environment=QDRANT_HOST=79.76.38.185
 Environment=QDRANT_PORT=6333
 Environment=QDRANT_COLLECTION=cyber_memory
 Environment=LLAMA_SERVER_URL=http://localhost:8082
+# DRAFT_LLAMA_SERVER_URL artik Sunucu 2'deki Docker konteynerinde calisan cirak modeli isaret eder.
+Environment=DRAFT_LLAMA_SERVER_URL=http://79.76.38.185:8088
 
 [Install]
 WantedBy=multi-user.target
