@@ -297,17 +297,26 @@ export async function POST(req: NextRequest) {
         // Upstream akışını transform süzgecinden geçirip istemciye dönüyoruz
         const transformedReadable = upstreamResponse.body.pipeThrough(transformStream);
 
-        // waitUntil()'i burada, ANA FONKSİYON GÖVDESİNDE (senkron bağlamda) çağırıyoruz.
-        // Bu Promise, stream tamamen bitene (flush() çalışana) kadar bekler, SONRA hafıza
-        // kaydı isteğini atar — ama bu bekleme tamamen arka planda gerçekleşir, `return`
-        // ile tarayıcıya döndürülen Response nesnesini hiçbir şekilde bloklamaz.
-        waitUntil(
-          streamDonePromise.then((finalText) => {
-            if (latestUserMessage && finalText.trim().length > 0) {
-              return saveToMemoryFireAndForget(latestUserMessage, finalText, memoryServiceUrl);
-            }
-          })
-        );
+        // GEÇİCİ OLARAK DEVRE DIŞI: /remember çağrısı, hafızaya değer mi diye karar vermek için
+        // AYNI llama.cpp sunucusuna (aynı CPU, aynı model) ikinci bir istek atıyordu. Bu, ana
+        // sohbet isteğiyle kaynak çekişmesine giriyor ve normal mesajların bile (örn. "merhaba")
+        // dakikalarca gecikmesine yol açıyordu (gözlemlenen: httpcore.ReadTimeout ~126s sonra).
+        // Kalıcı çözüm (ayrı bir slot/model ile karar verdirme) kurulana kadar bu adım tamamen
+        // atlanıyor — hafıza kaydı durur ama sohbet hızı her zaman korunur.
+        const MEMORY_SAVE_ENABLED = false;
+        if (MEMORY_SAVE_ENABLED) {
+          // waitUntil()'i burada, ANA FONKSİYON GÖVDESİNDE (senkron bağlamda) çağırıyoruz.
+          // Bu Promise, stream tamamen bitene (flush() çalışana) kadar bekler, SONRA hafıza
+          // kaydı isteğini atar — ama bu bekleme tamamen arka planda gerçekleşir, `return`
+          // ile tarayıcıya döndürülen Response nesnesini hiçbir şekilde bloklamaz.
+          waitUntil(
+            streamDonePromise.then((finalText) => {
+              if (latestUserMessage && finalText.trim().length > 0) {
+                return saveToMemoryFireAndForget(latestUserMessage, finalText, memoryServiceUrl);
+              }
+            })
+          );
+        }
 
         return new Response(transformedReadable, {
           status: 200,
