@@ -43,17 +43,30 @@ const DEFAULT_MEMORY_SERVICE_URL = "http://79.76.63.191:8083";
  *
  * HAYIR ise: RAG ve web search TAMAMEN atlanır, istek doğrudan ana modele gider — gecikme
  * neredeyse sıfıra iner.
- * EVET ise: RAG + web search (Tavily) çalıştırılır, sonuç ana modele GÜÇLÜ ve ZORLAYICI bir
- * sistem talimatıyla iletilir (bkz. aşağıdaki webSearchContext hazırlığı).
+ * EVET ise: RAG + web search (Tavily) çalıştırılır — web search artık ham kullanıcı mesajı
+ * yerine küçük modelin ürettiği OPTİMİZE EDİLMİŞ arama sorgusuyla (searchQuery) yapılır — ve
+ * sonuç ana modele GÜÇLÜ ve ZORLAYICI bir sistem talimatıyla iletilir (bkz. aşağıdaki
+ * webSearchContext hazırlığı).
+ *
+ * v3 NOTU: /decide artık düz EVET/HAYIR metni yerine yapılandırılmış JSON döndürüyor:
+ * { needs_realtime_info: boolean, search_query: string }. search_query, küçük model
+ * tarafından üretilen ve Tavily'ye gönderilecek optimize edilmiş arama ifadesidir (ham
+ * kullanıcı mesajından daha kısa/öz olabilir) — bu sayede web araması daha isabetli sonuç verir.
  */
 
+interface DecideResult {
+  needsRealtimeInfo: boolean;
+  searchQuery: string;
+}
+
 // Çırak (küçük) modelin karar servisi başarısız olur/zaman aşımına uğrarsa güvenli tarafta
-// kalıyoruz: eskisi gibi RAG+web search çalışsın (needsRealtimeInfo=true varsayılır).
-async function decideNeedsRealtimeInfo(userMessage: string, memoryServiceUrl: string): Promise<boolean> {
+// kalıyoruz: eskisi gibi RAG+web search çalışsın (needsRealtimeInfo=true varsayılır), ve arama
+// sorgusu olarak ham kullanıcı mesajını kullanırız (optimize sorgu üretilemediği için).
+async function decideNeedsRealtimeInfo(userMessage: string, memoryServiceUrl: string): Promise<DecideResult> {
   const controller = new AbortController();
   // Çırak model ayrı bir süreçte, düşük max_tokens ile çalıştığı için hızlı olmalı.
   // Yine de ağ/servis gecikmesine karşı makul ama sıkı bir zaman aşımı koyuyoruz.
-  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
 
   try {
     const response = await fetch(`${memoryServiceUrl}/decide`, {
@@ -67,16 +80,21 @@ async function decideNeedsRealtimeInfo(userMessage: string, memoryServiceUrl: st
 
     if (!response.ok) {
       console.warn(`/decide çağrısı hata döndürdü: ${response.status}. Güvenli taraf: EVET (RAG+web search çalışacak).`);
-      return true;
+      return { needsRealtimeInfo: true, searchQuery: userMessage };
     }
 
     const data = await response.json();
-    console.log(`Çırak-usta kararı: ${data.needs_realtime_info ? "EVET (RAG+web search çalışacak)" : "HAYIR (RAG+web search atlanacak)"} | Çırak çıktısı: '${data.raw_output}'${data.fallback_used ? " [FALLBACK]" : ""}`);
-    return data.needs_realtime_info !== false; // beklenmeyen alan/tip durumunda da güvenli tarafta kal
+    const needsRealtimeInfo = data.needs_realtime_info !== false; // beklenmeyen alan/tip durumunda da güvenli tarafta kal
+    const searchQuery = (typeof data.search_query === "string" && data.search_query.trim().length > 0)
+      ? data.search_query.trim()
+      : userMessage;
+
+    console.log(`Çırak-usta kararı: ${needsRealtimeInfo ? "EVET (RAG+web search çalışacak)" : "HAYIR (RAG+web search atlanacak)"} | Çırak çıktısı: '${data.raw_output}' | search_query: '${searchQuery}'${data.fallback_used ? " [FALLBACK]" : ""}`);
+    return { needsRealtimeInfo, searchQuery };
   } catch (error: any) {
     clearTimeout(timeoutId);
     console.warn("/decide adımı atlandı veya zaman aşımına uğradı, güvenli taraf: EVET (RAG+web search çalışacak):", error.message || error);
-    return true;
+    return { needsRealtimeInfo: true, searchQuery: userMessage };
   }
 }
 
@@ -118,10 +136,14 @@ export async function POST(req: NextRequest) {
     // 3.5. ADIM: ÇIRAK-USTA KARAR ADIMI
     // RAG ve web search'ü çalıştırıp çalıştırmayacağımıza küçük ("çırak") model karar verir.
     // HAYIR ise aşağıdaki iki blok (RAG + web search) TAMAMEN atlanır — istek doğrudan ana
-    // modele gider, gecikme neredeyse sıfıra iner. EVET ise ikisi de normal şekilde çalışır.
+    // modele gider, gecikme neredeyse sıfıra iner. EVET ise ikisi de normal şekilde çalışır ve
+    // web search, küçük modelin ürettiği optimize edilmiş searchQuery ile yapılır.
     let needsRealtimeInfo = false;
+    let searchQuery: string = latestUserMessage || "";
     if (latestUserMessage) {
-      needsRealtimeInfo = await decideNeedsRealtimeInfo(latestUserMessage, memoryServiceUrl);
+      const decideResult = await decideNeedsRealtimeInfo(latestUserMessage, memoryServiceUrl);
+      needsRealtimeInfo = decideResult.needsRealtimeInfo;
+      searchQuery = decideResult.searchQuery;
     }
 
     // 4. ADIM A: RAG (Geçmiş Hafıza) Araması
@@ -173,10 +195,13 @@ export async function POST(req: NextRequest) {
       const webSearchTimeoutId = setTimeout(() => webSearchController.abort(), 6000);
 
       try {
+        // NOT: Artık ham latestUserMessage yerine, küçük modelin ürettiği optimize edilmiş
+        // searchQuery gönderiliyor (ör. "bugün dolar kuru kaç, güncel durum ne?" yerine
+        // "güncel dolar kuru") — bu, Tavily'den daha isabetli/alakalı sonuç dönmesini sağlar.
         const webSearchResponse = await fetch(`${memoryServiceUrl}/web_search`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: latestUserMessage, max_results: 4 }),
+          body: JSON.stringify({ query: searchQuery, max_results: 4 }),
           signal: webSearchController.signal,
         });
 
