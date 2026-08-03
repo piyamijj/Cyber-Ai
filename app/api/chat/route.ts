@@ -155,10 +155,14 @@ export async function POST(req: NextRequest) {
       const ragTimeoutId = setTimeout(() => ragController.abort(), 4000);
 
       try {
+        // NOT: top_k 4'ten 2'ye düşürüldü — büyük modele giden prompt'un boyutunu küçültüp
+        // (14B model CPU'da prompt işleme süresi token sayısıyla doğrudan orantılı) toplam
+        // gecikmeyi azaltmak için. RAG zaten sadece "alakalıysa kullan" diyen yumuşak bir ipucu;
+        // 2 sonuç çoğu durumda yeterli bağlamı sağlar.
         const ragResponse = await fetch(`${memoryServiceUrl}/search`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: latestUserMessage, top_k: 4 }),
+          body: JSON.stringify({ query: latestUserMessage, top_k: 2 }),
           signal: ragController.signal,
         });
 
@@ -168,7 +172,9 @@ export async function POST(req: NextRequest) {
           const ragData = await ragResponse.json();
           if (ragData.found && ragData.results && ragData.results.length > 0) {
             const memories = ragData.results.map((r: any) => `- ${r.text}`).join("\n");
-            ragContext = `Aşağıda geçmiş konuşmalardan hatırlanan, bu soruyla alakalı olabilecek bilgiler var. Eğer alakalıysa kullan, değilse görmezden gel:\n${memories}`;
+            // NOT: Metin kısaltıldı (önceki sürüm daha uzun bir açıklama cümlesi kullanıyordu) —
+            // prompt boyutunu küçültmek için, aynı anlamı daha az token ile veriyoruz.
+            ragContext = `Geçmiş hafızadan alakalı olabilecek notlar (alakalıysa kullan, değilse yoksay):\n${memories}`;
             console.log("RAG Bağlamı başarıyla enjekte edildi.");
           }
         } else {
@@ -198,10 +204,13 @@ export async function POST(req: NextRequest) {
         // NOT: Artık ham latestUserMessage yerine, küçük modelin ürettiği optimize edilmiş
         // searchQuery gönderiliyor (ör. "bugün dolar kuru kaç, güncel durum ne?" yerine
         // "güncel dolar kuru") — bu, Tavily'den daha isabetli/alakalı sonuç dönmesini sağlar.
+        // max_results 4'ten 2'ye düşürüldü — büyük modele giden prompt boyutunu küçültüp
+        // (14B model CPU'da prompt işleme süresi token sayısıyla doğrudan orantılı) toplam
+        // gecikmeyi azaltmak için; 2 net/güvenilir sonuç genelde yeterlidir.
         const webSearchResponse = await fetch(`${memoryServiceUrl}/web_search`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: searchQuery, max_results: 4 }),
+          body: JSON.stringify({ query: searchQuery, max_results: 2 }),
           signal: webSearchController.signal,
         });
 
@@ -217,26 +226,21 @@ export async function POST(req: NextRequest) {
             const validResults = webSearchData.results.filter((r: any) =>
               typeof r.title === "string" && typeof r.snippet === "string" &&
               r.title.trim().length > 0 && r.snippet.trim().length > 0 &&
-              r.title.length <= 300 && r.snippet.length <= 600
+              r.title.length <= 300 && r.snippet.length <= 350
             );
 
             if (validResults.length > 0 && validResults.length === webSearchData.results.length) {
               const webResults = validResults
                 .map((r: any) => `- ${r.title}: ${r.snippet}`)
                 .join("\n");
-              // ÖNEMLİ: Bu talimat kasıtlı olarak sert ve zorlayıcı yazıldı. Önceki sürümde
-              // ("Bu bilgiler gerçek zamanlıdır, cevabında kullanabilirsin") büyük model bu
-              // sonuçları sık sık görmezden gelip "güncel veri sağlayamam" diyerek uydurma
-              // rakamlar/cevaplar üretiyordu. Bu yüzden burada modele seçenek bırakmıyoruz.
+              // ÖNEMLİ: Bu talimat kasıtlı olarak sert ve zorlayıcı — büyük model önceden bu tür
+              // sonuçları görmezden gelip "güncel veri sağlayamam" diyerek uydurma rakamlar
+              // üretiyordu. v4'te aynı katılıkta ama DAHA ÖZ bir ifadeyle yazıldı (token tasarrufu
+              // için — 14B model CPU'da prompt işleme süresi token sayısıyla orantılı).
               webSearchContext =
-                "SANA AŞAĞIDA GERÇEK ZAMANLI, GÜNCEL WEB ARAMA SONUÇLARI VERİLDİ. " +
-                "Bu bilgiyi MUTLAKA kullanarak cevap ver. ASLA 'güncel veri sağlayamam', " +
-                "'gerçek zamanlı bilgiye erişimim yok' veya benzeri bir cevap VERME — " +
-                "aşağıdaki sonuçlar sana gerçek zamanlı arama ile sağlanmış GÜNCEL VE GEÇERLİ " +
-                "bilgidir. ASLA kendi belleğinden uydurma rakam/tarih/isim üretme; SADECE " +
-                "aşağıda verilen sonuçlardaki bilgiyi kullan. Sonuçlar arasında doğrudan cevap " +
-                "yoksa, en yakın/ilgili bilgiyi ver ve hangi kaynaktan geldiğini belirt.\n\n" +
-                `Web arama sonuçları:\n${webResults}`;
+                "GERÇEK ZAMANLI GÜNCEL WEB ARAMA SONUÇLARI (MUTLAKA KULLAN, ASLA 'güncel veri " +
+                "sağlayamam' deme, ASLA rakam/tarih uydurma — SADECE aşağıdaki bilgiyi kullan):\n" +
+                webResults;
               console.log("Web arama bağlamı başarıyla enjekte edildi.");
             } else {
               console.warn("Web arama sonuçlarından bazıları doğrulamayı geçemedi, güvenlik için tüm bağlam atlandı.");
@@ -255,7 +259,9 @@ export async function POST(req: NextRequest) {
     // Cyber AI kimliğini tanımlayan ana sistem mesajı
     const identitySystemMessage = {
       role: "system",
-      content: "Sen Cyber AI'sın (veya kısaca Cyber). Oracle Cloud üzerinde çalışan, yüksek performanslı ve özel bir yapay zeka asistanısın. Kim olduğun sorulduğunda asla 'Qwen' veya 'Alibaba' olduğunu söyleme; kendini her zaman 'Cyber AI' olarak tanıt. Türkçe konuş. Eğer sana ayrı bir sistem mesajıyla güncel web arama sonuçları verilmişse, bunları mutlaka gerçek ve geçerli bilgi olarak kabul et; 'güncel veriye erişimim yok' gibi bir çelişkili cevap verme — bu kısıtlama SADECE web arama sonucu verilmediği durumlar için geçerlidir."
+      // NOT: Metin öz tutuldu (token tasarrufu) — bu mesaj HER istekte gönderildiği için
+      // (RAG/web search olsun olmasın) boyutu genel gecikmeyi doğrudan etkiler.
+      content: "Sen Cyber AI'sın (kısaca Cyber), Oracle Cloud üzerinde çalışan özel bir yapay zeka asistanısın. Asla 'Qwen'/'Alibaba' olduğunu söyleme, hep 'Cyber AI' de. Türkçe konuş. Ayrı bir sistem mesajıyla güncel web arama sonucu verilmişse bunu gerçek/geçerli kabul et, 'güncel veriye erişimim yok' deme — bu kısıtlama SADECE web arama sonucu verilmediğinde geçerlidir."
     };
 
     // Mesaj listesini oluşturuyoruz: [Kimlik Sistem Mesajı, RAG Sistem Mesajı (varsa),
