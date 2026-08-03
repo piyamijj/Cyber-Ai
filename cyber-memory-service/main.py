@@ -362,9 +362,13 @@ async def web_search(request: WebSearchRequest):
             if not title or not snippet:
                 continue
 
+            # NOT: snippet 600 -> 350 karaktere düşürüldü. Amaç: büyük modele (14B, CPU'da
+            # prompt işleme süresi token sayısıyla orantılı) giden toplam prompt boyutunu
+            # küçültüp gecikmeyi azaltmak. 350 karakter çoğu güncel bilgi (kur, hava durumu,
+            # haber özeti) için hâlâ yeterli bağlam sağlar.
             results.append(WebSearchResult(
                 title=title[:300],
-                snippet=snippet[:600],
+                snippet=snippet[:350],
                 url=url
             ))
 
