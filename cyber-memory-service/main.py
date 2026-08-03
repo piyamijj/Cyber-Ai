@@ -30,11 +30,11 @@ QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "cyber_memory")
 LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://localhost:8082")
 # "Çırak" (draft/küçük) model — qwen2.5-0.5b-instruct, ayrı bir llama-server sürecinde,
-# ayrı bir portta (varsayılan 8084) bağımsız olarak çalışır. Bu model /decide endpoint'i
+# ayrı bir portta (varsayılan 8088) bağımsız olarak çalışır. Bu model /decide endpoint'i
 # için kullanılır: kullanıcı mesajının güncel/harici bilgi gerektirip gerektirmediğine
 # hızlıca (düşük max_tokens ile ~1-2sn içinde) karar verir. Ana (14B, "usta") modelden
 # tamamen bağımsızdır — kaynak çekişmesine girmez, bu yüzden ana sohbet gecikmesini artırmaz.
-DRAFT_LLAMA_SERVER_URL = os.getenv("DRAFT_LLAMA_SERVER_URL", "http://localhost:8084")
+DRAFT_LLAMA_SERVER_URL = os.getenv("DRAFT_LLAMA_SERVER_URL", "http://localhost:8088")
 EMBEDDING_MODEL_NAME = "BAAI/bge-base-en-v1.5"
 
 # Arama için varsayılan parametreler
@@ -367,7 +367,7 @@ async def web_search(request: WebSearchRequest):
 async def decide_needs_realtime_info(request: DecideRequest):
     """
     'Çırak-usta' mimarisinin karar adımı: kullanıcının sorusunu KÜÇÜK modele (qwen2.5-0.5b,
-    ayrı port 8084'te, ana 14B modelden bağımsız çalışır) verip, bu sorunun güncel/harici/
+    ayrı port 8088'de, ana 14B modelden bağımsız çalışır) verip, bu sorunun güncel/harici/
     gerçek-zamanlı bilgi gerektirip gerektirmediğine SADECE EVET/HAYIR ile karar verdiriyoruz.
 
     Bu adım eskiden (route.ts içinde) basit bir anahtar kelime taramasıydı (isLikelyTimeSensitiveQuery)
