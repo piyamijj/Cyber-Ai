@@ -129,7 +129,7 @@ export async function POST(req: NextRequest) {
     // üretebiliyordu (DuckDuckGo scraping çıktısı temizlenmeden modele veriliyordu) ve
     // ekstra gecikmeye neden oluyordu. Kod sağlamlaştırılıp iyice test edilene kadar
     // "false &&" ile bu adımı tamamen atlıyoruz — normal sohbet deneyimi bundan etkilenmez.
-    const WEB_SEARCH_ENABLED = false;
+    const WEB_SEARCH_ENABLED = true;
     if (WEB_SEARCH_ENABLED && latestUserMessage && isLikelyTimeSensitiveQuery(latestUserMessage)) {
       const webSearchController = new AbortController();
       const webSearchTimeoutId = setTimeout(() => webSearchController.abort(), 6000);
