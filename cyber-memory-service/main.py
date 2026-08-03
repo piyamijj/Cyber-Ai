@@ -21,6 +21,12 @@ from sentence_transformers import SentenceTransformer
 # kod seviyesinde kesin max-tur sınırı ve approval_token ile early-exit mantığını içerir.
 import collab_orchestrator as collab
 
+# ALTERNATİF MİMARİ (kullanıcı önerisi): Cümle-Bazlı Sequential Relay.
+# Token-stream'e göre CPU çekişmesi daha az olması beklenen, daha basit/stabil bir alternatif.
+# Aynı Shared Context, aynı MAX_REVISION_TURNS/APPROVAL_TOKEN mantığını collab_orchestrator'dan
+# içe aktararak paylaşır; sadece çırak-usta etkileşiminin GRANÜLERİTESİ (cümle vs ham token) farklıdır.
+import collab_orchestrator_sentence as collab_sentence
+
 # 1. LOGGING AYARLARI
 # Servisin çalışmasını ve arka plandaki kararları takip edebilmek için loglama yapısını kuruyoruz.
 logging.basicConfig(
@@ -827,6 +833,197 @@ async def collab_stream(request: CollabRequest):
             yield sse("error", {"message": str(e)})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# =====================================================================================
+# ALTERNATİF MİMARİ: CÜMLE-BAZLI SEQUENTIAL RELAY (Kullanıcı Önerisi)
+# =====================================================================================
+# Kullanıcı, tam token-stream canlı besleme mimarisine göre daha basit ve CPU açısından
+# daha stabil olması beklenen bir alternatif önerdi: çırak bir CÜMLEYİ tamamladığı an,
+# o cümle usta modele değerlendirilmesi için gönderilir; çırak ise bir sonraki cümleyi
+# üretmeye ARA VERMEDEN devam eder. Usta'nın değerlendirmesi kısa ömürlü (bounded) bir
+# görevdir — çırağın TÜM üretim süresi boyunca değil, sadece o cümle için çalışır.
+#
+# Bu endpoint, /collab_stream ile AYNI SSE sözleşmesini (event: draft, critique, final,
+# error) kullanır ki route.ts / frontend tarafında minimum değişiklikle test edilebilsin.
+# Ek olarak "sentence_detail" event'i ile her cümlenin kabul/reddedilme detayını sağlar.
+
+
+@app.post("/collab_stream_sentence")
+async def collab_stream_sentence(request: CollabRequest):
+    """
+    ALTERNATİF MİMARİ ENDPOINT'İ: Cümle-Bazlı Sequential Relay ile işbirlikçi cevap üretimi.
+    Bkz. collab_orchestrator_sentence.py için tam mimari detayları ve CPU çekişmesi analizi.
+    """
+    if not request.query or not request.query.strip():
+        raise HTTPException(status_code=400, detail="query alanı boş olamaz.")
+
+    if request.conversation_history is not None:
+        for i, item in enumerate(request.conversation_history):
+            if not isinstance(item, dict) or "role" not in item or "content" not in item:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"conversation_history[{i}] geçersiz: 'role' ve 'content' alanları gerekli."
+                )
+
+    conversation_messages = request.conversation_history or [
+        {"role": "user", "content": request.query}
+    ]
+
+    async def event_generator():
+        def sse(event_name: str, data: dict) -> str:
+            return f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        try:
+            shared_context = await collab.fetch_shared_context(
+                user_query=request.query,
+                memory_search_fn=_memory_search_adapter,
+                web_search_fn=_web_search_adapter,
+                decide_fn=_decide_adapter
+            )
+            yield sse("shared_context_ready", {
+                "rag_used": bool(shared_context.rag_text),
+                "web_used": bool(shared_context.web_text),
+                "decide_meta": shared_context.decide_meta
+            })
+
+            request_timeout = httpx.Timeout(connect=10.0, read=200.0, write=10.0, pool=10.0)
+            async with httpx.AsyncClient(timeout=request_timeout) as client:
+                pipeline_result = await collab_sentence.run_sentence_relay_pipeline(
+                    client=client,
+                    draft_url=DRAFT_LLAMA_SERVER_URL,
+                    usta_url=LLAMA_SERVER_URL,
+                    draft_model_name=DRAFT_MODEL_NAME,
+                    usta_model_name=USTA_MODEL_NAME,
+                    shared_context=shared_context,
+                    conversation_messages=conversation_messages
+                )
+
+            for round_result in pipeline_result["rounds"]:
+                yield sse("draft", {
+                    "turn_index": round_result["turn_index"],
+                    "text": round_result["draft_text"]
+                })
+                yield sse("sentence_detail", {
+                    "turn_index": round_result["turn_index"],
+                    "rejection_ratio": round_result["rejection_ratio"],
+                    "sentence_results": round_result["sentence_results"],
+                    "timing": round_result["timing"]
+                })
+                yield sse("critique", {
+                    "turn_index": round_result["turn_index"],
+                    "text": round_result["assembled_text"],
+                    "approved": round_result["rejection_ratio"] <= collab_sentence.HIGH_REJECTION_RATIO_THRESHOLD,
+                    "timing": round_result["timing"]
+                })
+
+            yield sse("final", {
+                "text": pipeline_result["final_answer"],
+                "approved_early": pipeline_result["approved_early"],
+                "turns_used": pipeline_result["turns_used"],
+                "total_pipeline_seconds": pipeline_result["total_pipeline_seconds"],
+                "architecture": pipeline_result["architecture"]
+            })
+
+        except Exception as e:
+            logger.error(f"/collab_stream_sentence sırasında hata: {e}", exc_info=True)
+            yield sse("error", {"message": str(e)})
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# =====================================================================================
+# A/B KARŞILAŞTIRMA ENDPOINT'İ: TOKEN-STREAM vs CÜMLE-BAZLI RELAY
+# =====================================================================================
+# Bu endpoint, kullanıcının sunucuda TEK bir istekle iki mimariyi ARKA ARKAYA çalıştırıp
+# gerçek zamanlama farkını görebilmesi için eklendi. Non-streaming (JSON) döner — SSE
+# akışını canlı izlemek isteyen /collab_stream veya /collab_stream_sentence'ı kullanmalı.
+#
+# ÖNEMLİ: Bu endpoint iki pipeline'ı SIRAYLA çalıştırır (aynı anda değil), bu yüzden CPU
+# çekişmesi ölçümü için ideal değildir (CPU çekişmesini ölçmek için bkz. benchmark_cpu_
+# contention.sh, o script gerçek eş-zamanlı isteklerle çalışır). Bu endpoint'in amacı,
+# İKİ MİMARİNİN KENDİ İÇİNDEKİ toplam gecikmesini ve kalite/tur davranışını karşılaştırmaktır.
+@app.post("/collab_compare")
+async def collab_compare(request: CollabRequest):
+    """
+    Token-stream mimarisi (collab_orchestrator) ile Cümle-Bazlı Relay mimarisini
+    (collab_orchestrator_sentence) AYNI soru için sırayla çalıştırıp, toplam süre ve
+    tur/onay davranışlarını karşılaştıran bir JSON raporu döner.
+    """
+    if not request.query or not request.query.strip():
+        raise HTTPException(status_code=400, detail="query alanı boş olamaz.")
+
+    # Diğer collab_stream* endpoint'leriyle aynı giriş doğrulaması: her öğe role/content içermeli.
+    if request.conversation_history is not None:
+        for i, item in enumerate(request.conversation_history):
+            if not isinstance(item, dict) or "role" not in item or "content" not in item:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"conversation_history[{i}] geçersiz: 'role' ve 'content' alanları gerekli."
+                )
+
+    conversation_messages = request.conversation_history or [
+        {"role": "user", "content": request.query}
+    ]
+
+    # Shared Context'i BİR KEZ çekip iki mimari arasında paylaşıyoruz — böylece RAG/web
+    # arama süresi karşılaştırmayı bozmuyor, sadece çırak-usta etkileşim mimarisi kıyaslanıyor.
+    shared_context = await collab.fetch_shared_context(
+        user_query=request.query,
+        memory_search_fn=_memory_search_adapter,
+        web_search_fn=_web_search_adapter,
+        decide_fn=_decide_adapter
+    )
+
+    request_timeout = httpx.Timeout(connect=10.0, read=200.0, write=10.0, pool=10.0)
+
+    results = {}
+
+    try:
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
+            token_stream_result = await collab.run_collaborative_pipeline(
+                client=client,
+                draft_url=DRAFT_LLAMA_SERVER_URL,
+                usta_url=LLAMA_SERVER_URL,
+                draft_model_name=DRAFT_MODEL_NAME,
+                usta_model_name=USTA_MODEL_NAME,
+                shared_context=shared_context,
+                conversation_messages=list(conversation_messages)
+            )
+        results["token_stream"] = {
+            "architecture": token_stream_result["architecture"],
+            "final_answer": token_stream_result["final_answer"],
+            "approved_early": token_stream_result["approved_early"],
+            "turns_used": token_stream_result["turns_used"],
+            "total_pipeline_seconds": token_stream_result["total_pipeline_seconds"]
+        }
+    except Exception as e:
+        logger.error(f"/collab_compare (token_stream) sırasında hata: {e}", exc_info=True)
+        results["token_stream"] = {"error": str(e)}
+
+    try:
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
+            sentence_relay_result = await collab_sentence.run_sentence_relay_pipeline(
+                client=client,
+                draft_url=DRAFT_LLAMA_SERVER_URL,
+                usta_url=LLAMA_SERVER_URL,
+                draft_model_name=DRAFT_MODEL_NAME,
+                usta_model_name=USTA_MODEL_NAME,
+                shared_context=shared_context,
+                conversation_messages=list(conversation_messages)
+            )
+        results["sentence_relay"] = {
+            "architecture": sentence_relay_result["architecture"],
+            "final_answer": sentence_relay_result["final_answer"],
+            "approved_early": sentence_relay_result["approved_early"],
+            "turns_used": sentence_relay_result["turns_used"],
+            "total_pipeline_seconds": sentence_relay_result["total_pipeline_seconds"]
+        }
+    except Exception as e:
+        logger.error(f"/collab_compare (sentence_relay) sırasında hata: {e}", exc_info=True)
+        results["sentence_relay"] = {"error": str(e)}
+
+    return results
 
 
 # 8. DOĞRUDAN ÇALIŞTIRMA DESTEĞİ

@@ -491,5 +491,9 @@ async def run_collaborative_pipeline(
         "final_answer": final_answer,
         "approved_early": approved_early,
         "turns_used": turns_used,
-        "total_pipeline_seconds": total_pipeline_seconds
+        "total_pipeline_seconds": total_pipeline_seconds,
+        # "architecture" alanı, bu token-stream mimarisini (canlı asyncio.Queue pipe) aynı API
+        # üzerinden sunulan alternatif cümle-bazlı mimariden (collab_orchestrator_sentence.py)
+        # ayırt etmek için eklendi — bkz. run_sentence_relay_pipeline'ın "sentence_relay" değeri.
+        "architecture": "token_stream"
     }
