@@ -42,10 +42,27 @@ RUN git clone --depth 1 https://github.com/ggerganov/llama.cpp.git
 
 # Derleme dizinini oluşturup CMake ile CPU-only (Release) derlemesini başlatıyoruz
 WORKDIR /app/llama.cpp/build
+#
+# DÜZELTME (kritik hata çözümü): llama.cpp'nin CMake yapılandırması VARSAYILAN olarak
+# BUILD_SHARED_LIBS=ON ile derler — bu durumda 'llama-server' ikili dosyası derleme
+# çıktısındaki libllama.so / libggml*.so / libllama-server-impl.so gibi paylaşımlı
+# (shared) kütüphanelere DİNAMİK olarak bağlanır. Bu .so dosyaları binary ile AYNI
+# derleme dizininde üretilir; runtime (çalışma) aşamasına SADECE binary kopyalanıp bu
+# .so dosyaları kopyalanmazsa, konteyner başlatıldığında binary bu kütüphaneleri
+# bulamaz ve "error while loading shared libraries: ... cannot open shared object file"
+# hatasıyla çöker (crash-loop). Bu, önceki sürümde gözlemlenen tam olarak budur.
+#
+# ÇÖZÜM: -DBUILD_SHARED_LIBS=OFF ile STATİK bağlama zorluyoruz. Bu sayede 'llama-server'
+# ikili dosyası TÜM llama.cpp/ggml kodunu kendi içine gömer, runtime'da HİÇBİR .so
+# bağımlılığı kalmaz — sadece tek bir bağımsız (self-contained) binary'yi kopyalamak
+# yeterli olur. Bu, multi-stage Docker build'lerinde çok daha sağlam ve öngörülebilir
+# bir yaklaşımdır (hangi .so dosyalarının üretildiğini/kopyalanması gerektiğini takip
+# etmek zorunda kalmayız).
 RUN cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
     -DGGML_CUDA=OFF \
     -DLLAMA_CURL=ON \
+    -DBUILD_SHARED_LIBS=OFF \
     && cmake --build . --config Release -j$(nproc) --target llama-server
 
 # -------------------------------------------------------------------------------------
@@ -62,6 +79,18 @@ RUN apt-get update && apt-get install -y \
 
 # Derleme aşamasında üretilen 'llama-server' ikili dosyasını kopyalıyoruz
 COPY --from=build /app/llama.cpp/build/bin/llama-server /usr/local/bin/llama-server
+
+# SAVUNMA KATMANI (defense-in-depth): -DBUILD_SHARED_LIBS=OFF ile statik derleme
+# yaptığımız için normalde /app/llama.cpp/build/bin altında .so dosyası ÜRETİLMEZ.
+# Ancak bazı llama.cpp sürümlerinde bazı alt bileşenler yine de paylaşımlı kütüphane
+# olarak çıkabilir. Bu ihtimale karşı, eğer .so dosyası varsa onları da kopyalayıp
+# LD_LIBRARY_PATH'e ekliyoruz — .so dosyası yoksa bu adım sessizce hiçbir şey yapmaz
+# (glob eşleşmezse Docker COPY hata vermesin diye önce kontrol edip koşullu kopyalıyoruz).
+COPY --from=build /app/llama.cpp/build/bin/ /tmp/llama-build-bin/
+RUN (find /tmp/llama-build-bin -maxdepth 1 -name "*.so*" -exec cp -P {} /usr/local/lib/ \; ; \
+     ldconfig ; \
+     rm -rf /tmp/llama-build-bin)
+ENV LD_LIBRARY_PATH=/usr/local/lib
 
 # Model dosyalarının bağlanacağı (mount) dizini oluşturuyoruz
 RUN mkdir -p /models /llama-cache

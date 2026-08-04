@@ -55,12 +55,28 @@ services:
       # Bu klasör silinirse tüm geçmiş RAG hafızası kaybolur!
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
-    # Qdrant'ın sağlıklı çalışıp çalışmadığını kontrol eden mekanizma
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz || wget --no-verbose --tries=1 --spider http://localhost:6333/healthz || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+    # -----------------------------------------------------------------------------------
+    # HEALTHCHECK KALDIRILDI (kritik hata çözümü):
+    # -----------------------------------------------------------------------------------
+    # Önceki sürümde curl/wget tabanlı bir healthcheck tanımlıydı ve Qdrant'ı sürekli
+    # "unhealthy" gösteriyordu — HALBUKİ Qdrant'ın kendisi gerçekte sorunsuz çalışıyordu
+    # (host'tan yapılan manuel curl testi bunu doğruladı: healthz check passed).
+    #
+    # KÖK NEDEN: Resmi 'qdrant/qdrant' Docker imajı DISTROLESS'tir — içinde curl, wget,
+    # hatta bir SHELL (sh/bash) bile YOKTUR (bkz. github.com/qdrant/qdrant/issues/3491,
+    # Qdrant ekibinin kendi yanıtı: "the image is distroless, so it doesn't have a shell
+    # or any other utilities"). Docker healthcheck'in CMD-SHELL biçimi HER ZAMAN bir
+    # shell gerektirir (/bin/sh -c ... ile çalıştırılır) — bu imajda shell olmadığı için
+    # CMD-SHELL tabanlı HİÇBİR healthcheck çalışamaz (curl/wget/bash/dev-tcp fark etmez,
+    # hepsi aynı "shell bulunamadı" nedeniyle başarısız olur).
+    #
+    # ÇÖZÜM: Qdrant'ın kendi önerisi (gRPC health-check protokolü veya harici bir
+    # 'sidecar' araç, örn. grpc_health_probe) bu projenin kapsamı için gereksiz bir
+    # karmaşıklık ekler. Bunun yerine healthcheck'i TAMAMEN KALDIRDIK — konteynerin
+    # gerçek çalışma durumu 'docker compose ps' (STATUS sütunu: Up / Restarting / Exited)
+    # ile zaten doğru şekilde görülebiliyor, ve gerçek servis sağlığı host'tan/Sunucu 1'den
+    # yapılan curl testleriyle (bkz. deploy/server2/README.md Adım 8) doğrulanıyor.
+    # -----------------------------------------------------------------------------------
 
   # -----------------------------------------------------------------------------------
   # 2. ÇIRAK (DRAFT) LLAMA-SERVER SÜRECİ
