@@ -523,7 +523,12 @@ async def run_draft_critique_round(
             messages=draft_messages,
             queue=chunk_queue,
             max_tokens=2048,
-            temperature=0.6
+            temperature=0.6,
+            # KAPSAM NOTU: Tutarlılık için DRY sampling ile aynı 5 çağrı noktasına stop
+            # tokens eklendi (bkz. collab_orchestrator_sentence.py'deki DRAFT_STOP_SEQUENCES
+            # açıklaması). Bu modül (token-stream) artık referans/varsayılan-dışı olsa da
+            # aynı çırak modeli kullandığı için aynı prompt-echo riskini taşıyabilir.
+            stop=DRAFT_STOP_SEQUENCES
         )
     )
 
@@ -619,7 +624,8 @@ async def run_draft_critique_round(
                         "repeat_last_n": REPEAT_LAST_N,
                         "dry_multiplier": DRY_MULTIPLIER,
                         "dry_base": DRY_BASE,
-                        "dry_allowed_length": DRY_ALLOWED_LENGTH
+                        "dry_allowed_length": DRY_ALLOWED_LENGTH,
+                        "stop": DRAFT_STOP_SEQUENCES
                     },
                     timeout=150.0
                 )
@@ -669,7 +675,8 @@ async def run_draft_critique_round(
                     "repeat_last_n": REPEAT_LAST_N,
                     "dry_multiplier": DRY_MULTIPLIER,
                     "dry_base": DRY_BASE,
-                    "dry_allowed_length": DRY_ALLOWED_LENGTH
+                    "dry_allowed_length": DRY_ALLOWED_LENGTH,
+                    "stop": DRAFT_STOP_SEQUENCES
                 },
                 timeout=150.0
             )

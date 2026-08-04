@@ -187,7 +187,14 @@ async def relay_sentence_to_usta(
                 "repeat_last_n": REPEAT_LAST_N,
                 "dry_multiplier": DRY_MULTIPLIER,
                 "dry_base": DRY_BASE,
-                "dry_allowed_length": DRY_ALLOWED_LENGTH
+                "dry_allowed_length": DRY_ALLOWED_LENGTH,
+                # KAPSAM NOTU: Kullanıcı talebi üzerine stop tokens DRY sampling ile AYNI 5
+                # çağrı noktasının tümüne tutarlılık için eklendi. Usta (14B) modelin bu
+                # spesifik prompt-echo davranışını sergilediğine dair bir kanıt YOK (sorun
+                # 0.5B çırakta gözlemlendi) — ama usta'nın çıktısı da bu ifadelerden birini
+                # ASLA meşru şekilde üretmeyeceği için (kritik metni asla "Bu bilgiyi
+                # kullanarak..." diye başlatmaz) risk yok, sadece ekstra güvenlik katmanı.
+                "stop": DRAFT_STOP_SEQUENCES
             },
             timeout=60.0
         )
