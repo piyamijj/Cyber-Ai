@@ -112,6 +112,13 @@ services:
     #     boyutu — Shared Context'in turlar arası tekrar kullanılmasını sağlayan asıl bayrak)
     #   --slot-save-path PATH (isteğe bağlı disk üzerinde slot kaydı — bu projede şimdilik
     #     gerekli değil, prompt caching zaten bellek içinde/slot bazlı otomatik çalışıyor)
+    # --chat-template chatml: KRİTİK DÜZELTME (canlı site testinde bulundu — "PAPAGAN/ECHO"
+    # REGRESYONU, bkz. cyber-memory-service/cyber-llama-draft.service.example'daki detaylı
+    # açıklama). llama-server, bu bayrak olmadan GGUF'un tokenizer.chat_template metadata'sına
+    # güvenir — bu alan eksik/hatalıysa model kendi eğitim formatıyla uyuşmayan bir prompt
+    # görür ve soruyu cevaplamak yerine hafifçe değiştirip geri yazar (klasik base-model
+    # davranışı). ChatML, Qwen2.5 ailesinin resmi formatıdır (llama.cpp resmi wiki'sinde
+    # doğrulandı).
     command: >
       llama-server 
       -m /models/qwen2.5-0.5b-instruct-q4_k_m.gguf 
@@ -119,6 +126,7 @@ services:
       --host 0.0.0.0 
       -c 4096 
       --cache-reuse 256 
+      --chat-template chatml 
       -t 2
     restart: unless-stopped
     # Qdrant ile doğrudan bir kod bağımlılığı yoktur (Hafıza servisi ikisiyle de ayrı ayrı konuşur),

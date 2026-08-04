@@ -62,12 +62,25 @@ Nice=10
 # --cache-prompt zaten VARSAYILAN OLARAK AÇIKTIR, ayrıca belirtmeye gerek yoktur.
 # -t 2: Çırak modelin sadece 2 CPU çekirdeği (thread) kullanmasını sağlar. Bu, 4 OCPU'lu
 #   sunucuda usta modele her zaman en az 2 çekirdeklik boş alan bırakılmasını garanti eder.
+# --chat-template chatml: KRİTİK DÜZELTME (canlı site testinde bulundu — "PAPAGAN/ECHO"
+#   REGRESYONU). Kullanıcı canlı sitede modelin kullanıcının SORUSUNU cevaplamak yerine,
+#   soruyu hafifçe değiştirip (emir kipinden soru kipine çevirip) GERİ YAZDIĞINI gözlemledi
+#   ("Bugünün haber başlıklarını ver" -> "Bugünün haberlerin başlıklarını belirtin.") — bu,
+#   instruct-tuned bir modelin bile chat template'i YANLIŞ/EKSİK uygulandığında sergilediği
+#   KLASİK "metni doğal devamıyla tamamla" (base-model-benzeri) davranışıdır. Kök neden
+#   ihtimali: llama-server, --chat-template AÇIKÇA belirtilmediğinde GGUF dosyasının
+#   içindeki tokenizer.chat_template metadata alanına güvenir — bu alan bu spesifik GGUF
+#   dönüştürmesinde eksik/hatalıysa, sunucu SESSİZCE genel/varsayılan bir şablona (ChatML
+#   DEĞİL) düşer ve model kendi eğitildiği formatla UYUŞMAYAN bir prompt görür. Bunu
+#   ihtimalden çıkarmak için Qwen2.5 ailesinin resmi ChatML formatını AÇIKÇA zorluyoruz
+#   (llama.cpp resmi wiki'sinde doğrulandı: <|im_start|>/<|im_end|> formatı = "chatml" adı).
 ExecStart=/home/ubuntu/llama.cpp/build/bin/llama-server \
   -m /home/ubuntu/models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
   --port 8088 \
   --host 0.0.0.0 \
   -c 4096 \
   --cache-reuse 256 \
+  --chat-template chatml \
   -t 2
 
 Restart=always
