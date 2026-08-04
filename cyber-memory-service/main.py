@@ -95,7 +95,15 @@ SEARCH_TOP_K = int(os.getenv("SEARCH_TOP_K", "5"))
 SEARCH_SCORE_THRESHOLD = float(os.getenv("SEARCH_SCORE_THRESHOLD", "0.38"))
 
 # Web araması için varsayılan sonuç sayısı ve zaman aşımı
-WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "4"))
+#
+# KALİTE DÜZELTMESİ (canlı site testinde bulundu — kullanıcının önerisi): 4 idi. Kullanıcı
+# "bugünkü önemli haber başlıklarından birkaçını ver" gibi geniş kapsamlı bir soru sorduğunda,
+# sadece 4 kaynak sonucu modelin elinde çok az malzeme bırakıyordu — bu da modelin (özellikle
+# 0.5B ölçeğinde) yetersiz kaynaktan bir liste oluşturmaya çalışırken farklı haberleri
+# birbirine karıştırmasına veya listeyi eksik/kısa bırakmasına katkıda bulunmuş olabilir.
+# 4 -> 8 yükseltildi (kullanıcının önerdiği 15-20 kadar agresif değil — Tavily gecikmesi ve
+# prompt boyutu/CPU süresi dengesini gözeterek daha ölçülü bir artış yapıldı).
+WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "8"))
 # Tavily API — resmi, API key'li arama servisi. DuckDuckGo'nun ücretsiz HTML kazıma
 # yöntemi sık sık CAPTCHA/bot-engellemesine takıldığı için (güvenilmez sonuç, bazen
 # gecikme) buna geçildi. Tavily özellikle LLM/agent kullanım senaryoları için tasarlanmış,

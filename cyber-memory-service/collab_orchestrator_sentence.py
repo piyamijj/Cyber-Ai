@@ -131,12 +131,19 @@ async def relay_sentence_to_usta(
         "3. BÜTÜNLÜK/OKUNABİLİRLİK KONTROLÜ: Aday cümle yarım, anlamsız, dilbilgisi açısından bozuk "
         "veya ham/işlenmemiş veri gibi mi görünüyor (örn. bir web arama sonucunun başlığı ile snippet'i "
         "birbirine karışmış, cümle tamamlanmamış)? Eğer öyleyse düzeltilmiş, akıcı bir cümle üret.\n"
+        "3b. LİSTE BÜTÜNLÜĞÜ KONTROLÜ (KRİTİK — canlı site testinde bulundu): Eğer kullanıcı bir "
+        "liste istiyorsa (örn. 'haber başlıklarından birkaçını ver'), aday cümle İKİ AYRI/FARKLI "
+        "haberi/öğeyi TEK bir cümlede BİRLEŞTİRİYOR mu (örn. bir haberin başlığı ile başka bir "
+        "haberin detayı yarım kalıp birbirine karışmış mı)? Eğer öyleyse, bunu AYRI AYRI, "
+        "numaralandırılmış madde(ler) halinde düzeltilmiş şekilde yeniden yaz — iki haberi ASLA "
+        "tek bir cümlede karıştırma.\n"
         "4. DİL KONTROLÜ: Aday cümle, '[KULLANICI SORUSU]' ile AYNI dilde mi yazılmış? Kullanıcı "
         "Türkçe sorduysa cümle SADECE Türkçe olmalı — eğer cümlede İngilizce (veya başka bir dil) "
         "kelime/ifade varsa (örn. 'Hello!', 'Sure', 'Here is...'), cümleyi TAMAMEN Türkçeye çevirerek "
         "düzeltilmiş halini üret; ASLA olduğu gibi onaylama.\n"
-        f"5. Eğer aday cümle yukarıdaki 4 kontrolden de geçiyorsa (tekrar değil, alakalı, akıcı, doğru "
-        f"dilde) VE tamamen doğru ve kaliteliyse, SADECE '{SENTENCE_APPROVAL_TOKEN}' yaz.\n"
+        f"5. Eğer aday cümle yukarıdaki tüm kontrollerden de geçiyorsa (tekrar değil, alakalı, akıcı, "
+        f"liste karışıklığı yok, doğru dilde) VE tamamen doğru ve kaliteliyse, SADECE "
+        f"'{SENTENCE_APPROVAL_TOKEN}' yaz.\n"
         "6. Eğer cümlede bilgi hatası, anlatım bozukluğu, dil hatası veya eksiklik varsa (ama tekrar/"
         "alakasız değilse), düzeltilmiş nihai cümleyi doğrudan yaz.\n"
         "7. Asla açıklama, selamlama veya ek metin ekleme. Sadece onay token'ını, boş metni veya "
@@ -247,13 +254,35 @@ async def run_sentence_relay_round(
     # cevap ver" genel kuralı eklendi (ileride başka bir dilde soru gelirse diye). İkinci
     # savunma katmanı olarak usta modelin değerlendirme kuralına da bir dil kontrolü eklendi
     # (aşağıda relay_sentence_to_usta içinde).
+    # KALİTE DÜZELTMESİ (canlı site testinde bulundu — LİSTE FORMATININ KAYBOLMASI):
+    # repeat_penalty düzeltmesinden sonra uydurma kelime sorunu gitti, AMA yeni bir sorun
+    # ortaya çıktı: aynı haber sorgusu birkaç kez tekrarlandığında cevap giderek KISALDI ve
+    # İKİ AYRI HABERİN birbirine karıştığı TEK, YARIM bir cümleye düştü — liste formatı
+    # tamamen kayboldu. Kök neden: draft_system_prompt'ta HİÇBİR YAPISAL FORMAT KURALI
+    # (numaralı liste, madde sayısı, madde başı kısa açıklama) yoktu — model "kapsamlı bir
+    # taslak üret" gibi genel bir talimatla baş başa kalınca, tutarlı bir liste yapısını
+    # kendi başına sürdüremedi (özellikle 0.5B ölçeğinde). Kullanıcının önerdiği prompt
+    # paketi temel alınarak AÇIK bir liste-format kuralı eklendi. NOT: "her zaman TAM 10
+    # madde üret, yoksa uydur" kuralı KASITLI OLARAK alınmadı — bu, kaynaklarda 10 madde
+    # olmadığında modeli tam da az önce düzelttiğimiz halüsinasyona geri iter. Bunun yerine
+    # "kaynakta kaç ayrı haber/madde varsa hepsini listele, ASLA uydurma" talimatı verildi.
     draft_system_prompt = (
         "Sen Cyber AI projesinin 'Çırak' (Draft) modelisin. Görevin, kullanıcının sorusuna "
         "hızlı, ham ve kapsamlı bir ilk taslak cevap üretmektir. "
         "DİL KURALI (KESİN VE ZORUNLU): Kullanıcının mesajı hangi dildeyse SEN DE O DİLDE "
         "cevap vermelisin. Kullanıcı Türkçe yazdıysa cevabın SADECE VE TAMAMEN Türkçe olmalı "
         "— tek bir İngilizce kelime/cümle bile ekleme (örn. 'Hello!', 'Sure', 'Here is...' gibi "
-        "İngilizce ifadelerle BAŞLAMA veya bunları KULLANMA)."
+        "İngilizce ifadelerle BAŞLAMA veya bunları KULLANMA). "
+        "LİSTE FORMAT KURALI (KESİN VE ZORUNLU — kullanıcı birden fazla öğe/haber/madde "
+        "istediğinde geçerlidir, örn. 'haber başlıklarından birkaçını ver'): (1) Kaynak "
+        "belgelerde (RAG/web arama sonuçlarında) birbirinden FARKLI kaç ayrı haber/öğe "
+        "varsa, HEPSİNİ ayrı ayrı listele — hiçbirini diğeriyle BİRLEŞTİRME, iki farklı "
+        "haberi TEK bir cümlede karıştırma. (2) Çıktıyı KESİNLİKLE '1. ', '2. ', '3. ' gibi "
+        "numaralandırılmış liste formatında yaz, asla tek bir paragrafa/cümleye sıkıştırma. "
+        "(3) Her madde için SADECE '[Başlık] - [en fazla bir cümlelik kısa açıklama]' "
+        "formatını kullan, uzun paragraflar yazma. (4) Kaynakta yeterli sayıda madde yoksa "
+        "ASLA uydurma/halüsinasyon ekleme — kaynakta kaç madde varsa sadece o kadarını "
+        "listele, azlığından bahsetme, sadece mevcut olanları düzgün formatta ver."
     )
     
     draft_messages = (
@@ -286,12 +315,18 @@ async def run_sentence_relay_round(
     # da tutarlı hale getirildi, bkz. collab_orchestrator.py). Ayrıca finish_reason artık
     # yakalanıp logluyor (bkz. aşağıdaki stream okuma döngüsü) — ileride yine "length" ile
     # kesilirse bu artık GÖRÜNÜR olacak, sessizce geçilmeyecek.
+    # KALİTE DÜZELTMESİ (canlı site testinde bulundu — kullanıcının önerisi): temperature
+    # 0.6 -> 0.3 düşürüldü. Haber/liste özetleme gibi FAKTÜEL görevlerde yüksek sıcaklık,
+    # modelin (özellikle 0.5B ölçeğinde) farklı öğeleri/haberleri birbirine karıştırıp
+    # tutarsız/yaratıcı ama YANLIŞ birleşimler üretmesi riskini artırır. 0.1-0.2 kadar
+    # agresif düşürülmedi (çırağın "hızlı ham taslak" rolü tamamen katılaşmasın diye),
+    # ama önceki 0.6'dan belirgin şekilde daha düşük, dengeli bir değer seçildi.
     endpoint = f"{draft_url}/v1/chat/completions"
     payload = {
         "model": draft_model_name,
         "messages": draft_messages,
         "stream": True,
-        "temperature": 0.6,
+        "temperature": 0.3,
         "max_tokens": 2048,
         "repeat_penalty": REPEAT_PENALTY,
         "repeat_last_n": REPEAT_LAST_N
