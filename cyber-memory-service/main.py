@@ -742,9 +742,20 @@ async def _decide_adapter(query: str) -> dict:
 @app.post("/collab_stream")
 async def collab_stream(request: CollabRequest):
     """
-    YENİ MİMARİ ANA ENDPOINT'İ: Streaming Çırak-Usta işbirlikçi cevap üretimi.
+    ARTIK VARSAYILAN DEĞİL — SADECE REFERANS/GELECEK KULLANIM İÇİN SAKLANIYOR.
 
-    Akış:
+    Bu, token-stream (tam canlı besleme) mimarisinin endpoint'idir. Kullanıcı, A/B
+    benchmark sonuçlarını (network latency, CPU contention, mimari karşılaştırma)
+    inceledikten sonra CÜMLE-BAZLI SEQUENTIAL RELAY mimarisini (/collab_stream_sentence)
+    PROJENİN RESMİ/VARSAYILAN mimarisi olarak onayladı (~4.3x daha hızlı, daha düşük CPU
+    çekişmesi, kalite guardrail'leri eklendikten sonra sağlıklı sonuç). route.ts/frontend
+    ARTIK BU ENDPOINT'İ ÇAĞIRMIYOR.
+
+    Bu kod kasıtlı olarak silinmedi — ileride GPU'lu bir sunucuya geçilirse (token-stream'in
+    CPU-çekişmesi dezavantajı ortadan kalkacağı için) tekrar değerlendirilebilir. O zamana
+    kadar bu sadece bir referans/yedek endpoint'tir, production akışının parçası DEĞİLDİR.
+
+    Akış (değişmedi, bilgi amaçlı):
       1. Shared Context bir kez çekilir (RAG + gerekiyorsa web search).
       2. run_collaborative_pipeline çağrılır: çırak taslak üretir, usta değerlendirir,
          approval_token görülürse ANINDA break, yoksa en fazla MAX_REVISION_TURNS tur döner.
@@ -752,10 +763,6 @@ async def collab_stream(request: CollabRequest):
          - Her turun çırak taslağı "draft" event'i olarak,
          - Usta eleştirisi/nihai cevabı "critique" event'i olarak,
          - Pipeline bitince "final" event'i (nihai cevap metni) ve zamanlama bilgisi gönderilir.
-
-    Bu endpoint, mevcut /decide + /search + /web_search akışının YERİNE GEÇMEK ÜZERE
-    tasarlanmıştır (route.ts bu endpoint'i çağıracak şekilde güncellenmelidir). Eski
-    endpoint'ler geriye dönük uyumluluk ve olası rollback için olduğu gibi bırakıldı.
     """
     if not request.query or not request.query.strip():
         raise HTTPException(status_code=400, detail="query alanı boş olamaz.")
@@ -852,7 +859,16 @@ async def collab_stream(request: CollabRequest):
 @app.post("/collab_stream_sentence")
 async def collab_stream_sentence(request: CollabRequest):
     """
-    ALTERNATİF MİMARİ ENDPOINT'İ: Cümle-Bazlı Sequential Relay ile işbirlikçi cevap üretimi.
+    RESMİ/VARSAYILAN MİMARİ ENDPOINT'İ (finalize edildi): Cümle-Bazlı Sequential Relay.
+
+    Kullanıcı, üç ölçümü (network latency, CPU contention, token-stream vs sentence-relay
+    A/B karşılaştırması) inceledikten ve kalite guardrail'leri (repeat_penalty/repeat_last_n
+    + tekrar-kontrolü prompt kuralları) eklendikten sonra bu mimariyi PROJENİN NİHAİ
+    mimarisi olarak onayladı: token-stream'e göre ~4.3x daha hızlı, CPU çekişmesi daha
+    düşük, tekrarlayan/dejenere çıktı sorunu düzeltildi. route.ts/frontend BU ENDPOINT'İ
+    çağırıyor — kullanıcı siteye girip soru sorduğunda otomatik olarak bu mimari çalışır,
+    ekstra parametre/seçim gerekmez.
+
     Bkz. collab_orchestrator_sentence.py için tam mimari detayları ve CPU çekişmesi analizi.
     """
     if not request.query or not request.query.strip():

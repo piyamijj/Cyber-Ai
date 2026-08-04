@@ -9,27 +9,40 @@ export const maxDuration = 290;
 
 /**
  * Cyber AI - Server-Side Proxy API Route (Streaming Çırak-Usta Entegrasyonlu)
- * 
- * YENİ MİMARİ VE ÇALIŞMA PRENSİBİ:
- * --------------------------------
- * Bu proxy artık doğrudan port 8082'deki 14B modeline bağlanmak yerine, Oracle sunucusunda
- * port 8083 üzerinde çalışan hafıza servisinin yeni `/collab_stream` endpoint'ini çağırır.
- * 
- * `/collab_stream` arka planda şu adımları yönetir:
+ *
+ * RESMİ/VARSAYILAN MİMARİ (finalize edildi): CÜMLE-BAZLI SEQUENTIAL RELAY
+ * ------------------------------------------------------------------------
+ * Bu proxy, Oracle sunucusunda port 8083 üzerinde çalışan hafıza servisinin
+ * `/collab_stream_sentence` endpoint'ini çağırır. Bu, kullanıcının onayladığı NİHAİ
+ * mimaridir: gerçek ölçümlerde token-stream mimarisine göre ~4.3x daha hızlı, CPU
+ * çekişmesi daha düşük ve (repeat_penalty + tekrar-kontrolü guardrail'leri eklendikten
+ * sonra) kalite açısından da sağlıklı sonuç veriyor.
+ *
+ * Eski `/collab_stream` (tam token-stream canlı besleme) endpoint'i backend'de hâlâ
+ * mevcut ve çalışır durumda bırakıldı — SADECE referans/gelecekte GPU'lu bir sunucuya
+ * geçilirse yeniden değerlendirilmek üzere saklanıyor. Bu proxy ARTIK ONU ÇAĞIRMIYOR.
+ *
+ * `/collab_stream_sentence` arka planda şu adımları yönetir:
  *   1. Shared Context (Tek Seferlik RAG): Kullanıcı sorusu geldiği ilk anda RAG (Qdrant) ve
  *      gerekirse web araması (Tavily) BİR SEFERDE çekilir ve ortak bir bağlam alanına konur.
- *   2. Streaming Çırak-Usta Döngüsü: Çırak model (0.5B) taslak cevabı üretirken, ürettiği
- *      stream chunk'ları usta modele (14B) asyncio.Queue üzerinden canlı olarak beslenir.
- *   3. Kod Seviyesinde Kesin Sınır: Revizyon döngüsü en fazla 2 tur ile sınırlıdır.
- *   4. Early-Exit (Erken Onay): Usta model 'APPROVAL_OK' onay token'ını ürettiği an döngü kesilir.
- * 
+ *   2. Cümle-Bazlı Sequential Relay: Çırak model (0.5B) bir CÜMLEYİ tamamladığı an, o cümle
+ *      usta modele (14B) değerlendirilmek üzere gönderilir; çırak ise bir sonraki cümleyi
+ *      üretmeye ARA VERMEDEN devam eder (usta'nın değerlendirmesi kısa ömürlü/bounded bir
+ *      görevdir). Usta reddettiği cümleyi düzeltip "araya sıkıştırır" (splice-in).
+ *   3. Kod Seviyesinde Kesin Sınır: Revizyon döngüsü en fazla 2 tur ile sınırlıdır; ayrıca
+ *      bir turdaki cümle-red oranı yüksekse (>%30) tam bir revizyon turu tetiklenir.
+ *   4. Early-Exit (Erken Onay): Usta tüm cümleleri onayladığında döngü erken kesilir.
+ *
  * BU PROXY'NİN GÖREVİ:
  * -------------------
- * `/collab_stream`'den gelen özel SSE akışını (event: draft, event: critique, event: final)
- * dinlemek ve bunu tarayıcıya OpenAI-uyumlu standart bir chat-completion SSE akışı olarak
- * (`data: {"choices":[{"delta":{"content": "..."}}]}\n\n`) yeniden iletmektir.
- * Bu sayede MEVCUT FRONTEND (`app/page.tsx`) ÜZERİNDE HİÇBİR DEĞİŞİKLİK YAPILMASI GEREKMEZ.
- * 
+ * `/collab_stream_sentence`, `/collab_stream` ile AYNI temel SSE sözleşmesini kullanır
+ * (event: draft, event: critique, event: final, event: error — ek olarak sadece bu
+ * mimariye özel bir "sentence_detail" event'i de gönderir, bu proxy onu görmezden gelip
+ * atlıyor). Bu proxy bu akışı dinleyip tarayıcıya OpenAI-uyumlu standart bir
+ * chat-completion SSE akışı olarak (`data: {"choices":[{"delta":{"content": "..."}}]}\n\n`)
+ * yeniden iletir. Bu sayede MEVCUT FRONTEND (`app/page.tsx`) ÜZERİNDE HİÇBİR DEĞİŞİKLİK
+ * YAPILMASI GEREKMEZ.
+ *
  * KULLANICI DENEYİMİ (UX) STRATEJİSİ:
  * ----------------------------------
  * 1. Çırak taslağı (`event: draft`) geldiği an, kullanıcının beklememesi için bu taslak metni
@@ -51,6 +64,10 @@ export const maxDuration = 290;
 
 const DEFAULT_MEMORY_SERVICE_URL = "http://79.76.63.191:8083";
 const memoryServiceUrl = process.env.MEMORY_SERVICE_URL || DEFAULT_MEMORY_SERVICE_URL;
+
+// RESMİ/VARSAYILAN MİMARİ: Cümle-Bazlı Sequential Relay (kullanıcı onaylı nihai karar).
+// Token-stream (/collab_stream) backend'de referans olarak saklanıyor ama artık çağrılmıyor.
+const COLLAB_ENDPOINT_PATH = "/collab_stream_sentence";
 
 // Simüle edilmiş yazma efekti için her SSE çerçevesinde gönderilecek karakter sayısı
 const TYPING_CHUNK_SIZE = 6;
@@ -92,14 +109,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 3. Oracle sunucusundaki /collab_stream endpoint'ine istek at
+    // 3. Oracle sunucusundaki /collab_stream_sentence (resmi/varsayılan mimari) endpoint'ine istek at
     const controller = new AbortController();
     // 280 saniyelik zaman aşımı (Vercel'in 290s sınırının hemen altında kalacak şekilde)
     const timeoutId = setTimeout(() => controller.abort(), 280000);
 
     let response;
     try {
-      response = await fetch(`${memoryServiceUrl}/collab_stream`, {
+      response = await fetch(`${memoryServiceUrl}${COLLAB_ENDPOINT_PATH}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

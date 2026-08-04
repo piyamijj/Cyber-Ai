@@ -2,6 +2,20 @@
 
 Oracle Cloud sunucunuzda port `8083` üzerinde çalışan, Qdrant vektör veritabanı ve `BAAI/bge-base-en-v1.5` embedding modeli kullanan, RAG (Retrieval-Augmented Generation) arama ve akıllı otomatik hafıza kaydı mikroservisi.
 
+---
+
+## MEVCUT DURUM (Güncel Özet — buradan devam edin)
+
+Bu bölüm, projenin şu anki nihai/canlı durumunu özetler; geçmiş kararların ayrıntıları aşağıdaki ilgili bölümlerde kalmaya devam eder.
+
+- **Sunucu mimarisi: DAĞITIK (distributed).** Sunucu 1 (usta modeli 14B + bu hafıza servisi + Next.js proxy'nin hedeflediği backend) ve Sunucu 2 (çırak modeli 0.5B + Qdrant, Docker/Docker Compose ile) — ikisi de aynı Oracle Cloud bölgesinde (`eu-stockholm-1`), aynı `cyber` VCN'inde. Bu ayrım, tek sunucuda iki modelin CPU çekişmesine girmesini KÖKTEN ortadan kaldırdı (ölçülen çekişme: %0).
+- **Çırak-Usta mimarisi: CÜMLE-BAZLI SEQUENTIAL RELAY resmi/varsayılan mimaridir.** Token-stream (tam canlı besleme) mimarisi ile yapılan A/B ölçümü sonrası kullanıcı tarafından NİHAİ karar olarak onaylandı: ~4.3x daha hızlı, CPU çekişmesi daha düşük. `route.ts` (Vercel proxy) artık `/collab_stream_sentence` endpoint'ini çağırıyor — kullanıcı siteye girip soru sorduğunda ekstra parametre gerekmeden otomatik olarak bu mimari çalışır. Token-stream endpoint'i (`/collab_stream`) koddan SİLİNMEDİ, sadece artık production akışının bir parçası değil — ileride GPU'lu bir sunucuya geçilirse yeniden değerlendirilebilecek bir referans olarak saklanıyor.
+- **Kalite guardrail'leri eklendi:** Küçük çırak modelin (0.5B) tekrarlayan/dejenere çıktı üretme sorunu, iki katmanlı savunmayla giderildi — (1) `REPEAT_PENALTY`/`REPEAT_LAST_N` tüm llama-server çağrılarına eklendi, (2) usta'nın onay/değerlendirme prompt'larına açık "tekrar kontrolü" kuralı eklendi (sentence-relay'de tekrarlayan cümle boş string döndürülüp nihai metinden filtreleniyor).
+- **Tüm 3 temel ölçüm tamamlandı:** network latency (Sunucu 1 ↔ Sunucu 2 arası, aynı VCN sayesinde <1ms, mükemmel), CPU contention benchmark (%0, dağıtık mimari sayesinde), mimari A/B karşılaştırması (cümle-bazlı relay kazandı).
+- **Açık nokta / sıradaki adım:** Kullanıcının, en son kalite düzeltmelerini (repeat_penalty + guardrail + timeout düzeltmesi) ve bu mimari finalizasyonunu Sunucu 1 ve Sunucu 2'de `git pull` + dosya kopyalama + servis restart ile canlıya alması, ardından gerçek siteye (https://www.cyberci.duckdns.org) girip uçtan uca (RAG/web arama + cümle-bazlı relay canlı akışı) bir soru sorarak doğrulama yapması bekleniyor.
+
+---
+
 ## Özellikler
 
 - **RAG Arama (`POST /search`):** Kullanıcının sorduğu soruya göre Qdrant üzerinde anlamsal (vektörel) arama yapar. Alakasız geçmiş bilgileri elemek için bir benzerlik eşiği (`SEARCH_SCORE_THRESHOLD`) kullanır.
@@ -50,7 +64,9 @@ Bu servis doğrudan tarayıcıdan çağrılmaz. Sadece Vercel üzerindeki proxy 
 
 ---
 
-## YENİ MİMARİ: Streaming Çırak-Usta (Draft-Critique) İşbirlikçi Boru Hattı
+## REFERANS MİMARİ (ARTIK VARSAYILAN DEĞİL): Streaming Çırak-Usta (Draft-Critique) İşbirlikçi Boru Hattı
+
+> **Not:** Bu mimari, aşağıdaki "Cümle-Bazlı Sequential Relay" mimarisi ile yapılan A/B karşılaştırması sonrası kullanıcı tarafından resmi/varsayılan olmaktan çıkarıldı — koddan silinmedi, sadece `route.ts`/frontend artık bunu çağırmıyor. İleride GPU'lu bir sunucuya geçilirse yeniden değerlendirilebilir. Güncel/canlı mimari için önce **"MEVCUT DURUM"** bölümüne, ardından aşağıdaki **"RESMİ MİMARİ"** bölümüne bakın.
 
 `/collab_stream` endpoint'i, önceki basit `/decide` (arama gerekli mi kararı) mekanizmasının ÜZERİNE inşa edilmiş, tam bir işbirlikçi cevap üretim mimarisidir. Ana mantık `collab_orchestrator.py` dosyasında bulunur.
 
@@ -100,9 +116,9 @@ Eğer paralel mod denenecekse, çekişmeyi azaltmak için iki seçenek `cyber-ll
 
 ---
 
-## ALTERNATİF MİMARİ: Cümle-Bazlı Sequential Relay (Kullanıcı Önerisi, A/B Karşılaştırma)
+## RESMİ MİMARİ (finalize edildi): Cümle-Bazlı Sequential Relay
 
-Kullanıcı, tam token-stream canlı besleme mimarisine (yukarıda) göre CPU çekişmesini azaltması beklenen, daha basit bir alternatif önerdi: **cümle sınırında (sentence-boundary) sıralı aktarım**. Bu, `collab_orchestrator_sentence.py` içinde uygulandı ve mevcut token-stream mimarisiyle YAN YANA (aynı API üzerinden, ayrı endpoint'lerle) sunuluyor — biri diğerinin yerine geçmedi, ikisi de test edilebilir durumda.
+**Bu, projenin resmi/varsayılan mimarisidir.** Kullanıcı, tam token-stream canlı besleme mimarisine (yukarıda, artık referans) göre bu **cümle sınırında (sentence-boundary) sıralı aktarım** alternatifini önerdi; gerçek A/B ölçümü sonrası (~4.3x daha hızlı, daha düşük CPU çekişmesi, kalite guardrail'leri sonrası sağlıklı çıktı) bunu NİHAİ karar olarak onayladı. Bu, `collab_orchestrator_sentence.py` içinde uygulandı; `route.ts` (Vercel proxy) artık `/collab_stream_sentence` endpoint'ini çağırıyor — kullanıcı siteye girip soru sorduğunda otomatik olarak bu mimari devreye giriyor, ekstra parametre/seçim gerekmiyor. Token-stream endpoint'i hâlâ koddadır ama sadece referans/gelecek kullanım içindir (yukarıdaki bölüme bakın).
 
 ### Nasıl Çalışır?
 
