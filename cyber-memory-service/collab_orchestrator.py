@@ -32,6 +32,16 @@ CPU_NICE_LEVEL_FOR_DRAFT = int(os.getenv("COLLAB_DRAFT_NICE", "10"))
 # CPU contention (çekişme) riski nedeniyle GPU'suz sunucularda 0 kalması önerilir.
 CRITIQUE_EARLY_START_CHARS = int(os.getenv("COLLAB_EARLY_START_CHARS", "0"))
 
+# KALİTE DÜZELTMESİ: Tekrarlayan/dejenere çıktı sorununu önlemek için repetition
+# cezası. Özellikle küçük modeller (0.5B çırak) bu kontrol olmadan aynı cümleyi/kelime
+# grubunu döngüye girip defalarca tekrarlayabilir (benchmark_architectures.sh
+# testlerinde gözlemlendi). 1.1 llama.cpp'nin genel önerilen varsayılan değeridir
+# (1.0 = ceza yok, >1.0 = tekrarı cezalandırır, çok yüksek değerler tutarsız/rastgele
+# çıktıya yol açabileceği için 1.1-1.3 aralığında tutulması önerilir).
+REPEAT_PENALTY = float(os.getenv("COLLAB_REPEAT_PENALTY", "1.15"))
+# Cezanın geriye kaç token'a uygulanacağını belirler (son N token içinde tekrar aranır).
+REPEAT_LAST_N = int(os.getenv("COLLAB_REPEAT_LAST_N", "256"))
+
 
 @dataclass
 class SharedContext:
@@ -155,12 +165,20 @@ async def stream_llm_to_queue(
     full_text = ""
     endpoint = f"{base_url}/v1/chat/completions"
     
+    # DÜZELTME (kalite sorunu): repeat_penalty/repeat_last_n eksikliği, özellikle küçük
+    # modellerde (0.5B çırak) aynı cümlenin/kelime grubunun döngüye girip defalarca
+    # tekrarlanmasına (dejenere/repetition çıktı) yol açabilir. llama-server'ın
+    # OpenAI-uyumlu /v1/chat/completions endpoint'i "repeat_penalty" ve "repeat_last_n"
+    # alanlarını üst seviye (top-level) parametre olarak kabul eder (llama.cpp'ye özel
+    # eklentiler, OpenAI şemasının dışında ama llama-server tarafından desteklenir).
     payload = {
         "model": model_name,
         "messages": messages,
         "stream": True,
         "temperature": temperature,
-        "max_tokens": max_tokens
+        "max_tokens": max_tokens,
+        "repeat_penalty": REPEAT_PENALTY,
+        "repeat_last_n": REPEAT_LAST_N
     }
     if stop:
         payload["stop"] = stop
@@ -283,13 +301,31 @@ async def run_draft_critique_round(
     usta_end_time = 0.0
 
     # Usta (Critique) için sistem talimatı
+    #
+    # KALİTE GUARDRAIL'İ (kritik düzeltme): benchmark_architectures.sh testlerinde, çırak
+    # modelin (0.5B) ürettiği tekrarlayan/dejenere çıktıyı (aynı cümlenin 6-7 kez tekrar
+    # edilmesi gibi) usta modelin FARK ETMEDEN APPROVAL_TOKEN ile onayladığı gözlemlendi.
+    # Bu, usta'nın kalite değerlendirmesinin "tekrar/anlamsızlık" kontrolünü kapsamadığını
+    # gösteriyor — bu yüzden bu kontrolü sistem promptuna AÇIKÇA ve ZORUNLU bir kural
+    # olarak ekliyoruz. Bu, repeat_penalty/repeat_last_n (yukarıda REPEAT_PENALTY/
+    # REPEAT_LAST_N) düzeltmesinin TAMAMLAYICISIDIR — repeat_penalty üretim sırasında
+    # tekrarı önler (birincil savunma), bu guardrail ise üretim sonrası bir güvenlik ağı
+    # olarak, tekrar hâlâ oluşmuşsa usta'nın bunu YAKALAYIP reddetmesini sağlar (ikincil
+    # savunma — iki katmanlı, tek noktaya güvenmiyoruz).
     usta_system_prompt = (
         "Sen Cyber AI projesinin 'Usta' (Critique/Editor) modelisin. Görevin, çırak modelin ürettiği "
         "taslak cevabı, Shared Context (RAG ve Web Arama) verileri doğrultusunda titizlikle incelemek, "
         "hataları düzeltmek ve nihai mükemmel cevabı üretmektir.\n\n"
-        "Eğer çırağın taslağı tamamen doğru, eksiksiz ve mükemmelse, cevabına SADECE VE SADECE "
-        f"'{APPROVAL_TOKEN}' yazarak onay ver. Ekstra hiçbir açıklama ekleme.\n"
-        "Eğer taslakta düzeltilmesi gereken yerler varsa, düzeltilmiş nihai cevabı doğrudan üret."
+        "ZORUNLU KALİTE KONTROLÜ: Onay vermeden önce taslağı şu açılardan MUTLAKA kontrol et:\n"
+        "1. TEKRAR KONTROLÜ: Taslakta aynı cümle, ifade veya kelime grubu birden fazla kez "
+        "(art arda veya farklı yerlerde) tekrarlanıyor mu? Bu bir model hatasıdır (dejenere/repetition "
+        "çıktı) — böyle bir taslağı ASLA onaylama, tekrarları temizleyip tek, akıcı bir cevap üret.\n"
+        "2. ANLAMLILIK KONTROLÜ: Taslak, kullanıcının sorusuna gerçekten anlamlı ve tutarlı bir cevap "
+        "veriyor mu, yoksa döngüye girmiş/anlamsız bir metin mi? Anlamsızsa onaylama, düzelt.\n\n"
+        "Eğer taslak yukarıdaki kontrollerden geçiyorsa VE tamamen doğru, eksiksiz ve mükemmelse, "
+        f"cevabına SADECE VE SADECE '{APPROVAL_TOKEN}' yazarak onay ver. Ekstra hiçbir açıklama ekleme.\n"
+        "Eğer taslakta düzeltilmesi gereken yerler varsa (tekrar, hata, eksiklik fark etmez), "
+        "düzeltilmiş nihai cevabı doğrudan üret — ASLA APPROVAL_TOKEN ile birlikte hatalı içerik verme."
     )
 
     # Kuyruktan gelen verileri canlı olarak okuyoruz
@@ -322,7 +358,9 @@ async def run_draft_critique_round(
                         "messages": usta_messages,
                         "temperature": 0.2,
                         "max_tokens": 2048,
-                        "stream": False
+                        "stream": False,
+                        "repeat_penalty": REPEAT_PENALTY,
+                        "repeat_last_n": REPEAT_LAST_N
                     },
                     timeout=150.0
                 )
@@ -367,7 +405,9 @@ async def run_draft_critique_round(
                     "messages": usta_messages,
                     "temperature": 0.2,
                     "max_tokens": 2048,
-                    "stream": False
+                    "stream": False,
+                    "repeat_penalty": REPEAT_PENALTY,
+                    "repeat_last_n": REPEAT_LAST_N
                 },
                 timeout=150.0
             )

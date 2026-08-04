@@ -975,7 +975,17 @@ async def collab_compare(request: CollabRequest):
         decide_fn=_decide_adapter
     )
 
-    request_timeout = httpx.Timeout(connect=10.0, read=200.0, write=10.0, pool=10.0)
+    # DÜZELTME (kalite/tanı sorunu): read timeout 200.0 -> 280.0'a yükseltildi. Token-stream
+    # mimarisi 14B usta modelle EN FAZLA 2 tam tur (her turda hem çırak hem usta çağrısı,
+    # usta çağrısı max_tokens=2048 ile) çalıştırabilir; açık uçlu/uzun bir soru için bu
+    # CPU'da 200 saniyeyi kolayca aşabilir. Bu, benchmark_architectures.sh'te Soru 1'in
+    # ("AI ve ML farklarını açıkla") token-stream mimarisinde "error: ''" ile tamamen
+    # başarısız olmasının kök nedeniydi: httpx.ReadTimeout gibi zaman aşımı exception'larının
+    # str() temsili genellikle BOŞTUR — bu yüzden hata mesajı görünürde boş kalıyordu, sanki
+    # hata hiç açıklanmamış gibi görünüyordu. Aşağıda hem timeout'u gerçekçi bir değere
+    # çektik HEM DE hata mesajına exception TİPİNİ de ekledik (örn. "ReadTimeout: ..."),
+    # böylece bundan sonra bu tür sessiz/boş hatalar tanı için görünür olacak.
+    request_timeout = httpx.Timeout(connect=10.0, read=280.0, write=10.0, pool=10.0)
 
     results = {}
 
@@ -998,8 +1008,8 @@ async def collab_compare(request: CollabRequest):
             "total_pipeline_seconds": token_stream_result["total_pipeline_seconds"]
         }
     except Exception as e:
-        logger.error(f"/collab_compare (token_stream) sırasında hata: {e}", exc_info=True)
-        results["token_stream"] = {"error": str(e)}
+        logger.error(f"/collab_compare (token_stream) sırasında hata: {type(e).__name__}: {e}", exc_info=True)
+        results["token_stream"] = {"error": f"{type(e).__name__}: {e}" if str(e) else f"{type(e).__name__} (boş mesaj - muhtemelen zaman aşımı)"}
 
     try:
         async with httpx.AsyncClient(timeout=request_timeout) as client:
@@ -1020,8 +1030,8 @@ async def collab_compare(request: CollabRequest):
             "total_pipeline_seconds": sentence_relay_result["total_pipeline_seconds"]
         }
     except Exception as e:
-        logger.error(f"/collab_compare (sentence_relay) sırasında hata: {e}", exc_info=True)
-        results["sentence_relay"] = {"error": str(e)}
+        logger.error(f"/collab_compare (sentence_relay) sırasında hata: {type(e).__name__}: {e}", exc_info=True)
+        results["sentence_relay"] = {"error": f"{type(e).__name__}: {e}" if str(e) else f"{type(e).__name__} (boş mesaj - muhtemelen zaman aşımı)"}
 
     return results
 

@@ -13,7 +13,9 @@ from collab_orchestrator import (
     SharedContext,
     fetch_shared_context,
     MAX_REVISION_TURNS,
-    APPROVAL_TOKEN
+    APPROVAL_TOKEN,
+    REPEAT_PENALTY,
+    REPEAT_LAST_N
 )
 
 # 1. LOGGING AYARLARI
@@ -97,14 +99,27 @@ async def relay_sentence_to_usta(
     start_time = time.monotonic()
     
     # Usta modelin tek bir cümleyi değerlendirmesi için sistem talimatı
+    #
+    # KALİTE GUARDRAIL'İ (kritik düzeltme): benchmark_architectures.sh testlerinde çırak
+    # modelin (0.5B) AYNI CÜMLEYİ 6-7 kez art arda ürettiği ve usta modelin bunu FARK
+    # ETMEDEN her tekrarı ayrı ayrı "SENTENCE_OK" ile onayladığı gözlemlendi — çünkü usta
+    # her cümleyi İZOLE değerlendiriyordu, "bu cümle önceki cümlelerle BİREBİR AYNI mı"
+    # diye bakmıyordu. Kural 1'i (tekrar kontrolü) EN BAŞA ve EN VURGULU şekilde ekliyoruz.
     usta_sentence_system_prompt = (
         "Sen Cyber AI projesinin 'Usta' (Critique/Editor) modelisin. Görevin, çırak modelin ürettiği "
         "tek bir aday cümleyi, Shared Context (RAG ve Web Arama) verileri ve o ana kadar yazılmış "
         "önceki cümlelerin akışı doğrultusunda titizlikle incelemektir.\n\n"
-        "KURALLAR:\n"
-        f"1. Eğer aday cümle tamamen doğru, bağlama uygun ve kaliteliyse, SADECE '{SENTENCE_APPROVAL_TOKEN}' yaz.\n"
-        "2. Eğer cümlede bilgi hatası, anlatım bozukluğu veya eksiklik varsa, düzeltilmiş nihai cümleyi doğrudan yaz.\n"
-        "3. Asla açıklama, selamlama veya ek metin ekleme. Sadece onay token'ını veya düzeltilmiş cümlenin kendisini döndür."
+        "KURALLAR (SIRAYLA UYGULA):\n"
+        "1. TEKRAR KONTROLÜ (ÖNCELİKLİ): Aday cümle, '[ÖNCEKİ CÜMLELER]' listesindeki herhangi bir "
+        "cümleyle BİREBİR AYNI veya ANLAMCA NEREDEYSE AYNI mı? Eğer öyleyse bu bir model hatasıdır "
+        "(dejenere/repetition çıktı) — ASLA SENTENCE_OK ile onaylama. Bunun yerine BOŞ bir metin "
+        "('') döndür (bu, bu tekrarlanan cümlenin nihai cevaptan tamamen çıkarılacağı anlamına gelir).\n"
+        f"2. Eğer aday cümle tekrar değilse VE tamamen doğru, bağlama uygun ve kaliteliyse, SADECE "
+        f"'{SENTENCE_APPROVAL_TOKEN}' yaz.\n"
+        "3. Eğer cümlede bilgi hatası, anlatım bozukluğu veya eksiklik varsa (ama tekrar değilse), "
+        "düzeltilmiş nihai cümleyi doğrudan yaz.\n"
+        "4. Asla açıklama, selamlama veya ek metin ekleme. Sadece onay token'ını, boş metni veya "
+        "düzeltilmiş cümlenin kendisini döndür."
     )
 
     # Bağlamı korumak için o ana kadar onaylanmış/düzeltilmiş cümleleri de usta modele iletiyoruz
@@ -127,7 +142,9 @@ async def relay_sentence_to_usta(
                 "messages": messages,
                 "temperature": 0.1,  # Kararlılık için çok düşük sıcaklık
                 "max_tokens": 256,   # Tek bir cümle için fazlasıyla yeterli
-                "stream": False
+                "stream": False,
+                "repeat_penalty": REPEAT_PENALTY,
+                "repeat_last_n": REPEAT_LAST_N
             },
             timeout=60.0
         )
@@ -231,7 +248,9 @@ async def run_sentence_relay_round(
         "messages": draft_messages,
         "stream": True,
         "temperature": 0.6,
-        "max_tokens": 1024
+        "max_tokens": 1024,
+        "repeat_penalty": REPEAT_PENALTY,
+        "repeat_last_n": REPEAT_LAST_N
     }
 
     draft_text = ""
@@ -349,7 +368,10 @@ async def run_sentence_relay_round(
                 "raw_usta": res["raw_usta_output"]
             })
 
-    assembled_text = " ".join(final_sentences)
+    # NOT: Usta, tekrarlayan bir cümleyi tespit ettiğinde boş string ("") döndürür (bkz.
+    # relay_sentence_to_usta'daki tekrar kontrolü guardrail'i) — bu cümleyi burada filtreleyip
+    # birleştiriyoruz, aksi halde fazladan boşluklar nihai metinde görünür hale gelirdi.
+    assembled_text = " ".join(s for s in final_sentences if s.strip())
     total_sentences = len(candidate_sentences)
     rejection_ratio = (rejected_count / total_sentences) if total_sentences > 0 else 0.0
 
