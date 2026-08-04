@@ -58,19 +58,25 @@ WORKDIR /app/llama.cpp/build
 # yeterli olur. Bu, multi-stage Docker build'lerinde çok daha sağlam ve öngörülebilir
 # bir yaklaşımdır (hangi .so dosyalarının üretildiğini/kopyalanması gerektiğini takip
 # etmek zorunda kalmayız).
-# EK DÜZELTME (2. tur - libgomp hatası): -DBUILD_SHARED_LIBS=OFF llama.cpp'nin KENDİ
-# kütüphanelerini statikleştirdi, ama GCC'nin OpenMP runtime kütüphanesi (libgomp.so.1
-# — llama.cpp'nin CPU paralelleştirmesi için GCC'nin -fopenmp özelliğiyle otomatik
-# bağlanır) hâlâ dinamik bağlıydı ve minimal runtime image'ında bu sistem paketi yoktu.
-# -static-libgomp (ve ayrıca -static-libstdc++/-static-libgcc, aynı sınıf sorunları
-# önceden bertaraf etmek için) ile OpenMP runtime'ını da binary'nin içine gömüyoruz —
-# bu, CMAKE_EXE_LINKER_FLAGS üzerinden linker'a iletiliyor.
+# EK DÜZELTME (2. tur - libgomp hatası, 3. turda GERİ ALINDI): -DBUILD_SHARED_LIBS=OFF
+# llama.cpp'nin KENDİ kütüphanelerini statikleştirdi, ama GCC'nin OpenMP runtime
+# kütüphanesi (libgomp.so.1) hâlâ dinamik bağlıydı. İlk denemede CMAKE_EXE_LINKER_FLAGS
+# ile "-static-libgomp -static-libstdc++ -static-libgcc" eklenmişti — ANCAK bu, CMake'in
+# project() komutu sırasında yaptığı derleyici doğrulama testini (küçük bir deneme
+# programı derleyip bağlama) BOZDU ("Configuring incomplete, errors occurred!"), çünkü
+# statik libstdc++/libgcc .a dosyaları bu build image'ında mevcut olmayabiliyor.
+#
+# GERİ ALMA KARARI: Bu riskli/kırılgan yaklaşımdan tamamen vazgeçildi. Onun yerine SADECE
+# runtime stage'deki "apt-get install -y libgomp1" çözümüne güveniliyor (aşağıda) — bu
+# hem daha basit hem daha az riskli: CMake configure aşamasını hiç etkilemez, sadece
+# normal bir sistem paketi kurulumudur. -DBUILD_SHARED_LIBS=OFF llama.cpp'nin kendi
+# kütüphanelerini zaten statikleştirdiği için geriye kalan TEK dinamik bağımlılık
+# libgomp'tu — runtime image'a libgomp1 paketini eklemek bunu tek başına çözer.
 RUN cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
     -DGGML_CUDA=OFF \
     -DLLAMA_CURL=ON \
     -DBUILD_SHARED_LIBS=OFF \
-    -DCMAKE_EXE_LINKER_FLAGS="-static-libgomp -static-libstdc++ -static-libgcc" \
     && cmake --build . --config Release -j$(nproc) --target llama-server
 
 # TANI ADIMI: Derlenen binary'nin GERÇEKTE hangi paylaşımlı kütüphanelere dinamik
@@ -89,11 +95,15 @@ FROM ubuntu:24.04
 
 # Çalışma zamanı için gerekli minimal kütüphaneleri yüklüyoruz (derleme araçları yok)
 #
-# SAVUNMA KATMANI (2. tur düzeltme): -static-libgomp derleme bayrağı OpenMP runtime'ını
-# binary'nin içine gömmeyi HEDEFLER, ama bazı GCC/glibc kombinasyonlarında linker bu
-# bayrağı sessizce yoksayıp yine dinamik bağlama yapabilir. Bu ihtimale karşı, libgomp1
-# sistem paketini de runtime image'a kuruyoruz — küçük bir paket (~100KB), image boyutunu
-# önemli ölçüde büyütmez, ama binary hâlâ dinamik bağlıysa çalışmasını garanti eder.
+# libgomp HATASI ÇÖZÜMÜ (3. tur - basit ve kalıcı yaklaşım): 'llama-server' GCC'nin
+# OpenMP runtime kütüphanesine (libgomp.so.1, CPU paralelleştirmesi için -fopenmp ile
+# otomatik bağlanır) dinamik olarak bağlıdır. -DBUILD_SHARED_LIBS=OFF llama.cpp'nin
+# KENDİ kütüphanelerini statikleştirse de libgomp bu kapsamın dışındadır (GCC'nin kendi
+# runtime'ı, linker bayraklarıyla statikleştirmek CMake configure aşamasını riske
+# atıyordu — o yaklaşımdan vazgeçildi). Bunun yerine EN BASİT çözüm: libgomp1 sistem
+# paketini runtime image'a kurmak. Küçük bir paket (~100KB), CMake/derleme sürecini
+# hiç etkilemez, ve -DBUILD_SHARED_LIBS=OFF sayesinde geriye kalan TEK dinamik
+# bağımlılık bu olduğu için, bu paket tek başına yeterlidir.
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     libcurl4 \
