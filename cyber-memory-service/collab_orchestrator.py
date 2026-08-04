@@ -117,6 +117,30 @@ class SharedContext:
     decide_meta: Dict[str, Any] = field(default_factory=dict)
     built_at: float = field(default_factory=time.time)
 
+    @property
+    def search_attempted_but_empty(self) -> bool:
+        """
+        True eğer '/decide' adımı web araması gerekli dediyse (needs_realtime_info=True)
+        AMA Tavily'den kullanılabilir hiçbir sonuç dönmediyse (web_text boş kaldı) VE
+        RAG'den de hiçbir alakalı kayıt gelmediyse (rag_text boş).
+
+        KALİTE DÜZELTMESİİ (canlı site testinde bulundu — BOŞ/ANLAMSIZ CEVAP REGRESYONU):
+        Kullanıcı "Bugünün önemli haber başlıklarını ver" diye sorduğunda, iki ardışık
+        denemede de şu tuhaf, kendi kendini tekrar eden cevap üretildi: "Üzgünüm, ama bu
+        bilgiyi kullanmak için gereken bir bilgi bulunmamaktadır. Bu bilgimiz genel bir
+        konu hakkında bilgiye sahiptir ve bu konu hakkında bilgiye sahiptir." Kök neden:
+        `to_system_blocks()` önceden rag_text VE web_text ikisi de boş olduğunda HİÇBİR
+        sistem bloğu eklemiyordu — çırak modele (0.5B) elinde kesinlikle HİÇBİR kaynak
+        veri olmadığı AÇIKÇA söylenmiyordu, sadece liste-format kuralı (ki bu kural veri
+        VARLIĞINI varsayıyor) veriliyordu. Küçük model, kendi başına "veri yok" durumunu
+        düzgün ifade edemeyip bozuk/tekrarlayan bir cümle üretti. Bu property, tam olarak
+        bu "arama yapıldı ama gerçekten hiçbir sonuç bulunamadı" durumunu tespit eder;
+        `to_system_blocks()` bu durumda çırağa NET bir "kısaca ve düzgünce veri
+        bulunamadığını söyle" talimatı ekler.
+        """
+        attempted = bool(self.decide_meta.get("needs_realtime_info"))
+        return attempted and not self.web_text.strip() and not self.rag_text.strip()
+
     def to_system_blocks(self) -> List[Dict[str, str]]:
         """
         Shared Context verilerini llama.cpp prompt caching özelliğine uygun,
@@ -157,7 +181,30 @@ class SharedContext:
                     f"özetle:\n{self.web_text.strip()}"
                 )
             })
-            
+
+        # 3. "Veri Yok" Durumu — KALİTE DÜZELTMESİ (canlı site testinde bulundu, bkz.
+        # search_attempted_but_empty property docstring'i). Web araması yapıldığı halde
+        # (kullanıcının sorusu güncel/gerçek-zamanlı bilgi gerektirdiği için) HİÇBİR
+        # kullanılabilir sonuç bulunamadıysa VE geçmiş hafızada da alakalı bir kayıt
+        # yoksa, çırak modele elinde GERÇEKTEN hiçbir kaynak veri olmadığını AÇIKÇA ve
+        # TEK CÜMLEYLE nasıl ifade edeceğini söylüyoruz. Bu talimat olmadan küçük model
+        # (0.5B) kendi başına tutarsız/kendi kendini tekrar eden bir "üzgünüm" cümlesi
+        # uydurmaya çalışıyordu.
+        if self.search_attempted_but_empty:
+            blocks.append({
+                "role": "system",
+                "content": (
+                    "DİKKAT: Bu soru için gerçek zamanlı web araması yapıldı AMA hiçbir "
+                    "kullanılabilir/güncel sonuç bulunamadı, ve geçmiş hafızada da bu soruyla "
+                    "ilgili bir kayıt yok. Elinde KULLANABILECEĞIN HİÇBİR kaynak veri YOK. "
+                    "Bu durumda ASLA rakam/tarih/haber başlığı UYDURMA, ASLA anlamsız veya "
+                    "kendi kendini tekrar eden cümleler kurma. Bunun yerine SADECE TEK, KISA "
+                    "ve NET bir cümleyle (kullanıcının sorduğu dilde) şu anda bu konuda güncel "
+                    "bilgiye erişemediğini söyle ve mümkünse dilersen daha spesifik/farklı bir "
+                    "şekilde tekrar sorabileceğini belirt. Başka hiçbir şey ekleme."
+                )
+            })
+
         return blocks
 
 

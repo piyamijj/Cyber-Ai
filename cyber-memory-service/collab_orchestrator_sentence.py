@@ -137,6 +137,13 @@ async def relay_sentence_to_usta(
         "haberin detayı yarım kalıp birbirine karışmış mı)? Eğer öyleyse, bunu AYRI AYRI, "
         "numaralandırılmış madde(ler) halinde düzeltilmiş şekilde yeniden yaz — iki haberi ASLA "
         "tek bir cümlede karıştırma.\n"
+        "3c. 'VERİ YOK' CÜMLESİ KONTROLÜ (canlı site testinde bulundu — BOŞ/ANLAMSIZ CEVAP "
+        "REGRESYONU): Eğer aday cümle 'bilgi yok/bulunamadı/erişemiyorum' gibi bir şey "
+        "söylemeye ÇALIŞIYORSA ama KENDİ KENDİNİ TEKRAR EDEN, tutarsız veya anlamsız bir "
+        "şekilde yazılmışsa (örn. aynı ifadeyi iki kez art arda söylüyorsa, ya da hem 'bilgi "
+        "yok' deyip hem 'bu konu hakkında bilgiye sahiptir' gibi çelişkili bir şey ekliyorsa), "
+        "bunu ASLA olduğu gibi onaylama — TEK, KISA, NET ve tutarlı bir 'şu anda bu konuda "
+        "güncel bilgiye erişemiyorum' cümlesiyle (kullanıcının sorduğu dilde) değiştirerek yaz.\n"
         "4. DİL KONTROLÜ: Aday cümle, '[KULLANICI SORUSU]' ile AYNI dilde mi yazılmış? Kullanıcı "
         "Türkçe sorduysa cümle SADECE Türkçe olmalı — eğer cümlede İngilizce (veya başka bir dil) "
         "kelime/ifade varsa (örn. 'Hello!', 'Sure', 'Here is...'), cümleyi TAMAMEN Türkçeye çevirerek "
@@ -282,7 +289,11 @@ async def run_sentence_relay_round(
         "(3) Her madde için SADECE '[Başlık] - [en fazla bir cümlelik kısa açıklama]' "
         "formatını kullan, uzun paragraflar yazma. (4) Kaynakta yeterli sayıda madde yoksa "
         "ASLA uydurma/halüsinasyon ekleme — kaynakta kaç madde varsa sadece o kadarını "
-        "listele, azlığından bahsetme, sadece mevcut olanları düzgün formatta ver."
+        "listele, azlığından bahsetme, sadece mevcut olanları düzgün formatta ver. "
+        "(5) EĞER SANA AYRICA BİR 'VERİ YOK' UYARISI VERİLDİYSE (yani elinde kaynakta "
+        "HİÇBİR madde/veri yoksa): yukarıdaki liste kuralını UYGULAMA, bunun yerine o "
+        "uyarıda tarif edildiği gibi SADECE TEK KISA bir cümleyle durumu bildir — ASLA "
+        "kendi kendini tekrar eden veya çelişkili bir açıklama uydurma."
     )
     
     draft_messages = (
