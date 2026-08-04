@@ -58,12 +58,29 @@ WORKDIR /app/llama.cpp/build
 # yeterli olur. Bu, multi-stage Docker build'lerinde çok daha sağlam ve öngörülebilir
 # bir yaklaşımdır (hangi .so dosyalarının üretildiğini/kopyalanması gerektiğini takip
 # etmek zorunda kalmayız).
+# EK DÜZELTME (2. tur - libgomp hatası): -DBUILD_SHARED_LIBS=OFF llama.cpp'nin KENDİ
+# kütüphanelerini statikleştirdi, ama GCC'nin OpenMP runtime kütüphanesi (libgomp.so.1
+# — llama.cpp'nin CPU paralelleştirmesi için GCC'nin -fopenmp özelliğiyle otomatik
+# bağlanır) hâlâ dinamik bağlıydı ve minimal runtime image'ında bu sistem paketi yoktu.
+# -static-libgomp (ve ayrıca -static-libstdc++/-static-libgcc, aynı sınıf sorunları
+# önceden bertaraf etmek için) ile OpenMP runtime'ını da binary'nin içine gömüyoruz —
+# bu, CMAKE_EXE_LINKER_FLAGS üzerinden linker'a iletiliyor.
 RUN cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
     -DGGML_CUDA=OFF \
     -DLLAMA_CURL=ON \
     -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_EXE_LINKER_FLAGS="-static-libgomp -static-libstdc++ -static-libgcc" \
     && cmake --build . --config Release -j$(nproc) --target llama-server
+
+# TANI ADIMI: Derlenen binary'nin GERÇEKTE hangi paylaşımlı kütüphanelere dinamik
+# bağlı olduğunu build log'una yazdırıyoruz (ldd, Ubuntu base image'ında libc-bin
+# paketiyle zaten hazır gelir, ek kurulum gerekmez). Bu, ileride yeni bir eksik .so
+# hatası çıkarsa, kullanıcının "docker build" çıktısında hangi kütüphanelerin gerekli
+# olduğunu build log'undan görüp runtime stage'e önceden ekleyebilmesini sağlar —
+# build başarısız olmaz, sadece bilgi amaçlıdır ("|| true" ile hataya karşı korunuyor).
+RUN echo "=== llama-server DİNAMİK BAĞIMLILIKLARI (ldd çıktısı) ===" && \
+    (ldd ./bin/llama-server || true)
 
 # -------------------------------------------------------------------------------------
 # 2. ÇALIŞMA AŞAMASI (RUNTIME STAGE)
@@ -71,9 +88,16 @@ RUN cmake .. \
 FROM ubuntu:24.04
 
 # Çalışma zamanı için gerekli minimal kütüphaneleri yüklüyoruz (derleme araçları yok)
+#
+# SAVUNMA KATMANI (2. tur düzeltme): -static-libgomp derleme bayrağı OpenMP runtime'ını
+# binary'nin içine gömmeyi HEDEFLER, ama bazı GCC/glibc kombinasyonlarında linker bu
+# bayrağı sessizce yoksayıp yine dinamik bağlama yapabilir. Bu ihtimale karşı, libgomp1
+# sistem paketini de runtime image'a kuruyoruz — küçük bir paket (~100KB), image boyutunu
+# önemli ölçüde büyütmez, ama binary hâlâ dinamik bağlıysa çalışmasını garanti eder.
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     libcurl4 \
+    libgomp1 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
