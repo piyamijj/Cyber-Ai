@@ -18,7 +18,8 @@ from collab_orchestrator import (
     REPEAT_LAST_N,
     DRY_MULTIPLIER,
     DRY_BASE,
-    DRY_ALLOWED_LENGTH
+    DRY_ALLOWED_LENGTH,
+    DRAFT_STOP_SEQUENCES
 )
 
 # 1. LOGGING AYARLARI
@@ -353,13 +354,22 @@ async def run_sentence_relay_round(
         "model": draft_model_name,
         "messages": draft_messages,
         "stream": True,
-        "temperature": 0.3,
+        # KALİTE DÜZELTMESİ (canlı site testinde bulundu — TEMPERATURE DÜŞÜRME):
+        # 0.3 -> 0.1. Kullanıcının canlı testte gözlemlediği prompt-echo/mantık hataları
+        # (kendi talimatını kopyalama, kendi özür kalıbını haber başlığı sanma) YÜKSEK
+        # yaratıcılık ayarıyla ilişkili klasik bir küçük-model (0.5B) hata modelidir. Usta
+        # zaten 0.1 civarında çalışıyor (bkz. usta_sentence_system_prompt çağrısındaki
+        # temperature), çırağı da aynı düşük değere çekmek tutarlılığı artırıyor.
+        "temperature": 0.1,
         "max_tokens": 2048,
         "repeat_penalty": REPEAT_PENALTY,
         "repeat_last_n": REPEAT_LAST_N,
         "dry_multiplier": DRY_MULTIPLIER,
         "dry_base": DRY_BASE,
-        "dry_allowed_length": DRY_ALLOWED_LENGTH
+        "dry_allowed_length": DRY_ALLOWED_LENGTH,
+        # STOP TOKENS — bkz. collab_orchestrator.py'deki DRAFT_STOP_SEQUENCES tanımının
+        # detaylı açıklaması. Çırak bu ifadelerden birini üretmeye başladığı an akış kesilir.
+        "stop": DRAFT_STOP_SEQUENCES
     }
 
     draft_text = ""
