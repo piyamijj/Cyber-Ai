@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import json
 import logging
@@ -41,6 +42,54 @@ CRITIQUE_EARLY_START_CHARS = int(os.getenv("COLLAB_EARLY_START_CHARS", "0"))
 REPEAT_PENALTY = float(os.getenv("COLLAB_REPEAT_PENALTY", "1.15"))
 # Cezanın geriye kaç token'a uygulanacağını belirler (son N token içinde tekrar aranır).
 REPEAT_LAST_N = int(os.getenv("COLLAB_REPEAT_LAST_N", "256"))
+
+# Türkçe'de anlamsal ağırlığı neredeyse hiç olmayan, RAG kelime-örtüşüm kontrolünde
+# yok sayılacak "stop word" listesi (yaygın bağlaçlar, edatlar, zamirler).
+_TURKISH_STOPWORDS = {
+    "ve", "veya", "ile", "bir", "bu", "şu", "o", "de", "da", "ki", "mi", "mu", "mü", "mı",
+    "için", "gibi", "ama", "fakat", "çok", "az", "en", "daha", "ne", "nasıl", "kim",
+    "hangi", "kaç", "ben", "sen", "biz", "siz", "onlar", "var", "yok", "ise", "diye",
+    "her", "bazı", "tüm", "kadar", "sonra", "önce", "bana", "sana", "ona", "bunu", "şunu"
+}
+
+
+def _keyword_overlap_ratio(query: str, candidate_text: str) -> float:
+    """
+    RAG'İN İKİNCİ, BAĞIMSIZ ALAKALILIK FİLTRESİ (canlı site testinde bulunan bir sızıntı
+    sonrası eklendi): Embedding tabanlı benzerlik skoru (SEARCH_SCORE_THRESHOLD) TEK
+    BAŞINA yeterli güvenilirlik sağlamadı — özellikle çok-turlu/takip sorularında, kısa ve
+    "genel" geçmiş hafıza kayıtları (örn. "her Salı 14:00 toplantı hatırlatması", "kedimin
+    adı Zeytin") vektör uzayında hemen hemen HER sorguya orta düzeyde benzerlik skoru
+    verebiliyor (BAAI/bge-base-en-v1.5 modelinin Türkçe'deki genel karakteristiği). Bu
+    yüzden, embedding skoruna EK olarak basit ama güvenilir bir KELİME ÖRTÜŞÜMÜ kontrolü
+    ekliyoruz: sorgu ile aday RAG metni arasında en az bir ANLAMLI (stopword olmayan,
+    3+ karakterli) ortak kelime yoksa, bu kayıt muhtemelen alakasızdır ve elenir.
+
+    Bu, embedding aramasının YERİNE geçmez (o zaten ilk filtredir, Qdrant tarafında
+    çalışır) — bunun ÜZERİNE eklenen, LLM çağrısı gerektirmeyen, hızlı ve deterministik
+    ikinci bir güvenlik ağıdır.
+    """
+    def _tokenize(text: str) -> set:
+        # NOT: Python'un standart str.lower()'ı Türkçe büyük noktalı 'İ' harfini YANLIŞ
+        # şekilde iki kod noktasına ("i" + BİRLEŞİK NOKTA işareti) çeviriyor (CPython'un
+        # bilinen bir Unicode/Türkçe kısıtlaması) — bu, "İstanbul" gibi büyük harfle
+        # başlayan özel isimlerin normal (küçük harfle yazılmış) haliyle EŞLEŞMEMESİNE yol
+        # açabilirdi (yanlış-negatif riski, tam da bu filtrenin önlemeye çalıştığı türden
+        # bir hataya benzer bir sızıntı). Bu yüzden Türkçe büyük/küçük İ-I harflerini
+        # `.lower()` çağrılmadan ÖNCE elle normalize ediyoruz.
+        normalized = (
+            text.replace("İ", "i").replace("I", "ı").lower()
+        )
+        words = re.findall(r"[a-zA-ZçğıöşüÇĞİÖŞÜ]+", normalized)
+        return {w for w in words if len(w) >= 3 and w not in _TURKISH_STOPWORDS}
+
+    query_words = _tokenize(query)
+    candidate_words = _tokenize(candidate_text)
+    if not query_words or not candidate_words:
+        return 0.0
+
+    overlap = query_words & candidate_words
+    return len(overlap) / len(query_words)
 
 
 @dataclass
@@ -144,9 +193,29 @@ async def fetch_shared_context(
         rag_result = None
 
     # RAG metnini hazırlıyoruz
+    #
+    # KALİTE DÜZELTMESİ (canlı site testinde bulundu — TAKİP SORUSUNDA RAG sızıntısı):
+    # Bir takip sorusunda ("12 yıl formasını giydiği kulübün ezeli rakibine imza atan
+    # kimdir...") Qdrant'tan İKİ TAMAMEN ALAKASIZ kayıt (bir toplantı hatırlatması ve bir
+    # kedi bilgisi notu) SEARCH_SCORE_THRESHOLD'u (0.38) geçip sızdı ve modelin cevabını
+    # tamamen anlamsız hale getirdi. Bunun nedeni, embedding benzerlik skorunun TEK BAŞINA
+    # yeterince güvenilir olmamasıdır (bkz. _keyword_overlap_ratio docstring'i). Artık her
+    # RAG sonucu, embedding eşiğini geçmiş olsa bile, EK bir kelime-örtüşümü kontrolünden
+    # geçiyor — sorguyla hiçbir anlamlı kelimesi örtüşmeyen kayıtlar burada elenir.
     rag_text = ""
     if rag_result and rag_result.get("found") and rag_result.get("results"):
-        rag_text = "\n".join([f"- {r['text']}" for r in rag_result["results"]])
+        relevant_results = []
+        for r in rag_result["results"]:
+            overlap_ratio = _keyword_overlap_ratio(user_query, r["text"])
+            if overlap_ratio > 0:
+                relevant_results.append(r)
+            else:
+                logger.info(
+                    f"RAG kaydı KELİME ÖRTÜŞÜMÜ FİLTRESİNDE elendi (embedding skoru geçmişti "
+                    f"ama sorguyla ortak anlamlı kelimesi yok): '{r['text'][:60]}...'"
+                )
+        if relevant_results:
+            rag_text = "\n".join([f"- {r['text']}" for r in relevant_results])
 
     # Karar sonucunu analiz ediyoruz
     needs_realtime = decide_result.get("needs_realtime_info", False) if isinstance(decide_result, dict) else False

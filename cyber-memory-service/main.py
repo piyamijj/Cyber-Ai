@@ -78,8 +78,19 @@ SEARCH_TOP_K = int(os.getenv("SEARCH_TOP_K", "5"))
 # 'Merhaba' yazdığında bile alakasız bir geçmiş hafıza kaydı ('Havva', 'güvenlik' konulu)
 # Shared Context'e sızıp modelin cevabını tamamen konu dışına kaydırdı. Eşik 0.2 -> 0.38
 # yükseltildi (Türkçe için hâlâ makul, gerçek eşleşmeleri kaçırmayacak kadar düşük ama
-# rastgele/alakasız kayıtları eleyecek kadar sıkı). Birincil savunma budur; ikincil
-# savunma ise Shared Context aşamasında kısa/trivial sorularda RAG'i hiç tetiklememek
+# rastgele/alakasız kayıtları eleyecek kadar sıkı).
+#
+# İKİNCİ TUR BULGU: Bu eşik TEK BAŞINA hâlâ yeterli olmadı — bir TAKİP SORUSUNDA
+# ("...imza atan kimdir, haberin detaylarını ver") iki tamamen alakasız kısa kayıt
+# (bir toplantı hatırlatması + bir kedi notu) yine de 0.38'i geçip sızdı. Kök neden:
+# BGE-base-en-v1.5, kısa/genel-amaçlı Türkçe metinlerde (günlük notlar gibi) vektör
+# uzayında "merkeze yakın" kalabiliyor, bu da onlara HER sorguya karşı orta düzeyde
+# (ama YANLIŞ) bir benzerlik skoru kazandırabiliyor. Eşiği daha da agresif yükseltmek
+# yerine (bu, GERÇEK eşleşmeleri de kaçırma riskini artırır), collab_orchestrator.py'deki
+# fetch_shared_context'e EMBEDDING SKORUNDAN BAĞIMSIZ bir İKİNCİ FİLTRE katmanı eklendi:
+# _keyword_overlap_ratio() — sorgu ile aday RAG metni arasında en az bir anlamlı ortak
+# kelime yoksa kayıt elenir. Bu üç katmanlı savunmadır: (1) bu eşik, (2) kelime-örtüşümü
+# filtresi, (3) Shared Context aşamasında trivial sorularda RAG'i hiç tetiklememek
 # (bkz. fetch_shared_context çağrısındaki is_likely_trivial kısayolu, main.py).
 SEARCH_SCORE_THRESHOLD = float(os.getenv("SEARCH_SCORE_THRESHOLD", "0.38"))
 
