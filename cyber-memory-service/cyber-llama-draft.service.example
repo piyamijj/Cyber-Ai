@@ -74,11 +74,28 @@ Nice=10
 #   DEĞİL) düşer ve model kendi eğitildiği formatla UYUŞMAYAN bir prompt görür. Bunu
 #   ihtimalden çıkarmak için Qwen2.5 ailesinin resmi ChatML formatını AÇIKÇA zorluyoruz
 #   (llama.cpp resmi wiki'sinde doğrulandı: <|im_start|>/<|im_end|> formatı = "chatml" adı).
+# -c 4096 -> 8192: KRİTİK DÜZELTME (canlı site testinde bulundu — "MENÜ/UI METNİ HALÜSİNASYONU
+#   + TEK KELİMELİK ANLAMSIZ LİSTE" REGRESYONU, önceki fix'lerden SONRA ortaya çıkan EN VAHIM
+#   belirti). Kök neden: llama-server, --no-context-shift AÇIKÇA verilmediği sürece VARSAYILAN
+#   OLARAK "context shift" özelliğiyle çalışır (llama.cpp resmi dokümantasyonuyla doğrulandı) —
+#   yani context penceresi (-c 4096) dolduğunda, sunucu HİÇBİR HATA VERMEDEN en ESKİ token'ları
+#   (ki bu genellikle SİSTEM PROMPTUNUN BAŞI/kuralları demektir) SESSİZCE atıp yerlerine yeni
+#   token ekler. Bu proje boyunca (chat-template, papağan-yasağı, kimlik kuralı, RAG/web
+#   etiketleme vb.) sistem promptu VE web arama sonuç sayısı (WEB_SEARCH_MAX_RESULTS 4->8)
+#   TUR TUR BÜYÜDÜ — toplam prompt boyutu (sistem promptu + 8 web sonucu + RAG verisi +
+#   konuşma geçmişi) muhtemelen 4096 token sınırını AŞMAYA başladı, llama-server modelin
+#   KENDİ TALİMATLARININ BİR KISMINI sessizce kırpmaya başladı. Model, eksik/parçalanmış bir
+#   talimat setiyle baş başa kalınca tutarlı bir cevap üretemedi — bu, gözlenen "kendi menü/arayüz
+#   kelimelerini anlamsızca tekrarlama" ve "10 madde ama her biri tek anlamsız kelime" belirtilerini
+#   TAM OLARAK açıklar (klasik context-overflow/fragmentation davranışı). Çözüm: context
+#   penceresini 8192'ye çıkararak (usta modelin zaten kullandığı boyutla eşitleyerek) gerçek
+#   promptun HİÇBİR ZAMAN sınırı aşmamasını sağlıyoruz — bu, sorunu YAPISAL olarak ortadan kaldırır
+#   (sampling parametresi ayarlamaktan farklı olarak, kök nedeni doğrudan çözer).
 ExecStart=/home/ubuntu/llama.cpp/build/bin/llama-server \
   -m /home/ubuntu/models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
   --port 8088 \
   --host 0.0.0.0 \
-  -c 4096 \
+  -c 8192 \
   --cache-reuse 256 \
   --chat-template chatml \
   -t 2

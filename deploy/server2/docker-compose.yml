@@ -119,12 +119,16 @@ services:
     # görür ve soruyu cevaplamak yerine hafifçe değiştirip geri yazar (klasik base-model
     # davranışı). ChatML, Qwen2.5 ailesinin resmi formatıdır (llama.cpp resmi wiki'sinde
     # doğrulandı).
+    # -c 4096 -> 8192: KRİTİK DÜZELTME (canlı site testinde bulundu — context-overflow/
+    # context-shift kaynaklı "menü metni halüsinasyonu + tek kelimelik anlamsız liste"
+    # regresyonu, bkz. cyber-llama-draft.service.example'daki detaylı açıklama). Usta modelin
+    # zaten kullandığı boyutla (8192) eşitlendi.
     command: >
       llama-server 
       -m /models/qwen2.5-0.5b-instruct-q4_k_m.gguf 
       --port 8088 
       --host 0.0.0.0 
-      -c 4096 
+      -c 8192 
       --cache-reuse 256 
       --chat-template chatml 
       -t 2
