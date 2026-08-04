@@ -319,6 +319,12 @@ async def run_draft_critique_round(
     chunk_queue = asyncio.Queue(maxsize=DRAFT_STREAM_CHUNK_QUEUE_MAXSIZE)
 
     # Çırak modelin stream görevini arka planda başlatıyoruz (Eş zamanlı üretim başlar)
+    #
+    # KALİTE DÜZELTMESİ (canlı site testinde bulundu — sentence-relay'deki aynı sorunun
+    # olası eşdeğeri): max_tokens 1024 -> 2048 yükseltildi. Açık uçlu/kapsamlı sorularda
+    # (örn. çok maddeli bir liste istendiğinde) 1024 token yetersiz kalıp cevabın yarıda
+    # kesilmesine yol açabiliyordu. Bkz. collab_orchestrator_sentence.py'deki eşdeğer
+    # düzeltme ve draft_finish_reason takibi.
     draft_task = asyncio.create_task(
         stream_llm_to_queue(
             client=client,
@@ -326,7 +332,7 @@ async def run_draft_critique_round(
             model_name=draft_model_name,
             messages=draft_messages,
             queue=chunk_queue,
-            max_tokens=1024,
+            max_tokens=2048,
             temperature=0.6
         )
     )

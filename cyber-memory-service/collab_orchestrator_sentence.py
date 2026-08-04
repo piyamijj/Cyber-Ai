@@ -275,19 +275,31 @@ async def run_sentence_relay_round(
     candidate_sentences: List[str] = []
 
     # Çırak modelin stream akışını başlatıyoruz
+    #
+    # KALİTE DÜZELTMESİ (canlı site testinde bulundu — cevabın erken/yarım kesilmesi):
+    # max_tokens önceden 1024 idi. Açık uçlu sorularda (örn. "haber başlıklarından birkaçını
+    # ver") 6-7 madde + kısa açıklamalar 1024 token'ı kolayca aşabiliyor, model tam bu sınıra
+    # ulaştığında (finish_reason="length") çıktı YARIDA/BİR CÜMLE ORTASINDA kesiliyordu ve bu
+    # sessizce oluyordu (hiçbir loglama/telafi yoktu) — SentenceBuffer.flush() da bu yarım
+    # kalan parçayı normal bir "cümle" gibi işleme aldığı için sonuç "yarım kesilmiş liste"
+    # izlenimi veriyordu. 1024 -> 2048 yükseltildi (token-stream mimarisindeki draft çağrısıyla
+    # da tutarlı hale getirildi, bkz. collab_orchestrator.py). Ayrıca finish_reason artık
+    # yakalanıp logluyor (bkz. aşağıdaki stream okuma döngüsü) — ileride yine "length" ile
+    # kesilirse bu artık GÖRÜNÜR olacak, sessizce geçilmeyecek.
     endpoint = f"{draft_url}/v1/chat/completions"
     payload = {
         "model": draft_model_name,
         "messages": draft_messages,
         "stream": True,
         "temperature": 0.6,
-        "max_tokens": 1024,
+        "max_tokens": 2048,
         "repeat_penalty": REPEAT_PENALTY,
         "repeat_last_n": REPEAT_LAST_N
     }
 
     draft_text = ""
     draft_start_time = time.monotonic()
+    draft_finish_reason: Optional[str] = None
 
     try:
         async with client.stream("POST", endpoint, json=payload, timeout=120.0) as response:
@@ -305,7 +317,13 @@ async def run_sentence_relay_round(
                 
                 try:
                     parsed = json.loads(data_str)
-                    content = parsed["choices"][0]["delta"].get("content", "")
+                    choice = parsed["choices"][0]
+                    content = choice["delta"].get("content", "")
+                    # finish_reason genelde sadece son chunk'ta dolu gelir (örn. "stop" veya
+                    # "length"). "length" ise model max_tokens sınırına ulaştığı için kesildi
+                    # demektir — bunu yakalayıp aşağıda logluyoruz (bkz. yukarıdaki not).
+                    if choice.get("finish_reason"):
+                        draft_finish_reason = choice["finish_reason"]
                     if content:
                         draft_text += content
                         
@@ -366,7 +384,16 @@ async def run_sentence_relay_round(
         raise e
 
     draft_duration = time.monotonic() - draft_start_time
-    logger.info(f"Çırak akışı bitti. Toplam {len(candidate_sentences)} cümle üretildi. Usta değerlendirmeleri bekleniyor...")
+    if draft_finish_reason == "length":
+        logger.warning(
+            f"Çırak akışı max_tokens (2048) sınırına ulaştığı için KESİLDİ (finish_reason=length) "
+            f"— cevap eksik/yarım kalmış olabilir. Sorgu çok kapsamlıysa max_tokens'ın daha da "
+            f"yükseltilmesi gerekebilir."
+        )
+    logger.info(
+        f"Çırak akışı bitti. Toplam {len(candidate_sentences)} cümle üretildi "
+        f"(finish_reason={draft_finish_reason or 'bilinmiyor'}). Usta değerlendirmeleri bekleniyor..."
+    )
 
     # Tüm usta değerlendirme görevlerinin tamamlanmasını bekliyoruz
     eval_start_time = time.monotonic()
@@ -421,6 +448,9 @@ async def run_sentence_relay_round(
         "sentence_results": sentence_details,
         "rejection_ratio": rejection_ratio,
         "turn_index": turn_index,
+        # Tanı görünürlüğü için: "length" ise çırak modelin max_tokens sınırına ulaştığı ve
+        # cevabın kesilmiş olabileceği anlamına gelir (bkz. yukarıdaki draft_finish_reason notu).
+        "draft_finish_reason": draft_finish_reason,
         "timing": {
             "draft_seconds": draft_duration,
             "usta_eval_seconds": eval_duration,

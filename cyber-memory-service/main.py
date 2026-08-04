@@ -971,6 +971,7 @@ async def collab_stream_sentence(request: CollabRequest):
                     "turn_index": round_result["turn_index"],
                     "rejection_ratio": round_result["rejection_ratio"],
                     "sentence_results": round_result["sentence_results"],
+                    "draft_finish_reason": round_result.get("draft_finish_reason"),
                     "timing": round_result["timing"]
                 })
                 yield sse("critique", {
