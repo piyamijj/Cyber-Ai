@@ -34,14 +34,25 @@ CPU_NICE_LEVEL_FOR_DRAFT = int(os.getenv("COLLAB_DRAFT_NICE", "10"))
 CRITIQUE_EARLY_START_CHARS = int(os.getenv("COLLAB_EARLY_START_CHARS", "0"))
 
 # KALİTE DÜZELTMESİ: Tekrarlayan/dejenere çıktı sorununu önlemek için repetition
-# cezası. Özellikle küçük modeller (0.5B çırak) bu kontrol olmadan aynı cümleyi/kelime
-# grubunu döngüye girip defalarca tekrarlayabilir (benchmark_architectures.sh
-# testlerinde gözlemlendi). 1.1 llama.cpp'nin genel önerilen varsayılan değeridir
-# (1.0 = ceza yok, >1.0 = tekrarı cezalandırır, çok yüksek değerler tutarsız/rastgele
-# çıktıya yol açabileceği için 1.1-1.3 aralığında tutulması önerilir).
-REPEAT_PENALTY = float(os.getenv("COLLAB_REPEAT_PENALTY", "1.15"))
+# cezası eklenmişti (1.15 / 256). AMA CANLI SİTE TESTİNDE YENİ BİR REGRESYON BULUNDU:
+# bu ayarlarla birlikte küçük çırak model (0.5B) bir haber özetinde TAMAMEN UYDURMA/
+# ANLAMSIZ kelimeler üretmeye başladı (örn. "Gücün Etkileri - Özür", "Zamanlı
+# Güçülüğünü - Hatta" gibi var olmayan kelimeler/ekler). Araştırma (web_search ile
+# llama.cpp sampling dokümantasyonu doğrulandı — bkz. blog.alexewerlof.com/p/
+# sampling-args-in-llama-server ve GitHub ggml-org/llama.cpp tartışmaları) KÖK NEDENİ
+# doğruladı: repeat_penalty, "the/a/ve/bir" gibi YAYGIN/YAPISAL kelimeleri de agresif
+# şekilde cezalandırıyor — repeat_last_n çok geniş tutulduğunda (256, kısa bir metnin
+# NEREDEYSE TAMAMINI kapsıyor) model doğru/yaygın kelimeleri kullanmaktan "cezalandırılmış"
+# hissedip, cezalandırılmamış ama ANLAMSIZ/uydurma kelimeler üretmeye zorlanıyor (kelime
+# havuzundaki "kalan kötü seçenekler" arasından seçim yapmak zorunda kalıyor — küçük/
+# quantize edilmiş modellerde bu risk çok daha yüksek). DÜZELTME: REPEAT_PENALTY 1.15 ->
+# 1.05 (daha ölçülü, tekrarı hâlâ caydırır ama grameri/kelime seçimini bu kadar
+# bozmaz), REPEAT_LAST_N 256 -> 64 (llama.cpp'nin resmi varsayılan/önerilen değeri —
+# 256, "uzun formda yaratıcı yazım" için önerilirdi, bizim kısa/yapılandırılmış cevap
+# senaryomuz için aşırıydı).
+REPEAT_PENALTY = float(os.getenv("COLLAB_REPEAT_PENALTY", "1.05"))
 # Cezanın geriye kaç token'a uygulanacağını belirler (son N token içinde tekrar aranır).
-REPEAT_LAST_N = int(os.getenv("COLLAB_REPEAT_LAST_N", "256"))
+REPEAT_LAST_N = int(os.getenv("COLLAB_REPEAT_LAST_N", "64"))
 
 # Türkçe'de anlamsal ağırlığı neredeyse hiç olmayan, RAG kelime-örtüşüm kontrolünde
 # yok sayılacak "stop word" listesi (yaygın bağlaçlar, edatlar, zamirler).
