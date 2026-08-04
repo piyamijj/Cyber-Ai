@@ -43,15 +43,22 @@ export const maxDuration = 290;
  * yeniden iletir. Bu sayede MEVCUT FRONTEND (`app/page.tsx`) ÜZERİNDE HİÇBİR DEĞİŞİKLİK
  * YAPILMASI GEREKMEZ.
  *
- * KULLANICI DENEYİMİ (UX) STRATEJİSİ:
- * ----------------------------------
- * 1. Çırak taslağı (`event: draft`) geldiği an, kullanıcının beklememesi için bu taslak metni
- *    tarayıcıya küçük parçalar halinde (simüle edilmiş yazma efektiyle) anında akıtılır.
- * 2. Nihai onaylı cevap (`event: final`) geldiğinde, eğer bu cevap çırağın taslağıyla birebir
- *    aynıysa (yani usta doğrudan onay verdiyse), metnin sonuna hafifçe "✅ onaylandı" notu eklenir.
- * 3. Eğer usta taslağı revize ettiyse, araya şık bir ayraç (`--- \n *Usta model tarafından gözden geçirilmiş...*`)
- *    eklenerek ustanın nihai cevabı da akışa dahil edilir. Böylece kullanıcı hem hızlı taslağı
- *    hem de ustanın titiz düzeltmesini şeffaf bir şekilde görür (metnin aniden değişmesi engellenir).
+ * KULLANICI DENEYİMİ (UX) STRATEJİSİ (canlı site testinde bulunan ÇİFT CEVAP hatası
+ * düzeltildikten sonra güncellendi):
+ * -------------------------------------------------------------------------------
+ * ÖNCEKİ TASARIM (artık geçerli değil, referans için not düşülüyor): Bu proxy önceden hem
+ * `event: draft` (çırağın taslağı) hem `event: final` (usta'nın nihai cevabı) metinlerini
+ * ayrı ayrı, ikisini de tarayıcıya akıtıyordu — token-stream mimarisinde bu iki metin
+ * genelde birbirinden belirgin şekilde FARKLIYDI (usta tam bir revizyon yapabiliyordu), bu
+ * yüzden ikisini ayrı ayrı göstermek anlamlıydı. AMA cümle-bazlı relay mimarisinde (şu anki
+ * resmi mimari) draft ve final neredeyse her zaman aynı/çok benzer metindir (düzeltmeler
+ * zaten cümle seviyesinde üretim sırasında yapılıyor) — bu yüzden ikisini ayrı ayrı akıtmak
+ * kullanıcıya AYNI CEVABI İKİ KEZ göstermeye yol açıyordu.
+ *
+ * GÜNCEL TASARIM: `event: draft` artık tarayıcıya HİÇ AKITILMIYOR (sadece log/ilerleme takibi
+ * için saklanıyor). Kullanıcı SADECE `event: final` içindeki nihai, tek ve temiz metni,
+ * simüle edilmiş yazma efektiyle (küçük parçalar halinde) görür. Böylece kullanıcı tek bir
+ * cevap görür, cevabın aniden değişmesi veya tekrarlanması söz konusu olmaz.
  * 
  * DÜRÜST SINIRLAMA NOTU (Simüle Edilmiş Yazma Efekti):
  * ---------------------------------------------------
@@ -227,42 +234,46 @@ export async function POST(req: NextRequest) {
                 }
 
                 // Gelen event tipine göre aksiyon alıyoruz
+                //
+                // KALİTE DÜZELTMESİ (canlı site testinde bulundu — ÇİFT CEVAP HATASI):
+                // Önceki mantık, token-stream mimarisi (/collab_stream) için tasarlanmıştı: orada
+                // "draft" (çırağın TEK BÜTÜN taslağı) ile "final" (usta'nın TEK BÜTÜN revizyonu)
+                // gerçekten birbirinden farklı, ayrı ayrı gösterilmeye değer iki şeydi. AMA
+                // cümle-bazlı relay (/collab_stream_sentence) mimarisinde bu ayrım artık geçerli
+                // değil: orada HER TUR için bir "draft" event'i geliyor (o turun çırak taslağı) VE
+                // ayrıca bir "final" event'i geliyor (tüm pipeline'ın nihai metni) — ikisi çoğu
+                // zaman neredeyse AYNI metindir (splice-in düzeltmeleri zaten üretim sırasında
+                // cümle seviyesinde yapılıyor, draft zaten neredeyse nihai halidir). Eski mantık
+                // draft'ı TAM olarak akıttıktan SONRA final'i de (birebir aynı olmadığı için,
+                // ufak cümle farkları yüzünden) tekrar TAM olarak akıtıyordu — kullanıcı aynı
+                // haber listesini/cevabı İKİ KEZ ard arda görüyordu.
+                //
+                // DÜZELTME: Bu mimaride draft event'lerini artık EKRANA YAZDIRMIYORUZ (sadece
+                // konsola log atıyoruz, kullanıcı akışını beklerken "typing" hissi vermek için
+                // ilerleme bilgisini saklıyoruz) — EKRANA SADECE "final" event'indeki nihai,
+                // tek ve temiz metin akıtılıyor. Böylece kullanıcı TEK BİR CEVAP görür.
                 if (currentEventName === "shared_context_ready") {
                   console.log(
                     `[Proxy] Shared Context Hazır. RAG: ${parsedData.rag_used}, Web: ${parsedData.web_used}`
                   );
                 } else if (currentEventName === "draft") {
-                  // Çırağın ürettiği taslak metni
+                  // Çırağın ürettiği taslak metni — ARTIK EKRANA AKITILMIYOR (bkz. yukarıdaki not),
+                  // sadece log ve "kullanıcı bir şey üretiliyor" sinyali için saklanıyor.
                   const draftText = parsedData.text || "";
                   lastDraftText = draftText;
-                  
                   if (draftText) {
-                    console.log(`[Proxy] Çırak taslağı akıtılıyor (${draftText.length} karakter)...`);
-                    await streamTextWithTypingEffect(draftText);
+                    console.log(`[Proxy] Çırak taslağı alındı (${draftText.length} karakter, ekrana yazılmıyor)...`);
                   }
                 } else if (currentEventName === "critique") {
                   console.log(
                     `[Proxy] Usta Değerlendirmesi (Tur: ${parsedData.turn_index}) | Onay: ${parsedData.approved} | Süre: ${parsedData.timing?.total_seconds?.toFixed(2)}sn`
                   );
                 } else if (currentEventName === "final") {
-                  // Nihai onaylı cevap metni
+                  // Nihai onaylı cevap metni — kullanıcının GÖRECEĞİ TEK metin budur.
                   const finalAnswer = parsedData.text || "";
-                  
                   if (finalAnswer) {
-                    // Eğer nihai cevap çırağın taslağıyla aynıysa (Usta doğrudan onay verdiyse)
-                    if (finalAnswer.trim() === lastDraftText.trim()) {
-                      console.log("[Proxy] Taslak usta tarafından doğrudan onaylandı.");
-                      await streamTextWithTypingEffect(
-                        "\n\n✅ *(Usta modeli taslağı onayladı — değişiklik gerekmedi)*"
-                      );
-                    } else {
-                      // Eğer usta taslağı revize ettiyse, araya şık bir ayraç koyup nihai cevabı akıtıyoruz
-                      console.log("[Proxy] Usta taslağı revize etti, nihai cevap akıtılıyor...");
-                      const separator =
-                        "\n\n---\n*(Usta model tarafından gözden geçirilmiş nihai cevap:)*\n\n";
-                      await streamTextWithTypingEffect(separator);
-                      await streamTextWithTypingEffect(finalAnswer);
-                    }
+                    console.log(`[Proxy] Nihai cevap akıtılıyor (${finalAnswer.length} karakter)...`);
+                    await streamTextWithTypingEffect(finalAnswer);
                   }
                 } else if (currentEventName === "error") {
                   console.error(`[Proxy] Sunucu tarafında hata: ${parsedData.message}`);

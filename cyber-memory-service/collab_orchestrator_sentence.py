@@ -131,11 +131,15 @@ async def relay_sentence_to_usta(
         "3. BÜTÜNLÜK/OKUNABİLİRLİK KONTROLÜ: Aday cümle yarım, anlamsız, dilbilgisi açısından bozuk "
         "veya ham/işlenmemiş veri gibi mi görünüyor (örn. bir web arama sonucunun başlığı ile snippet'i "
         "birbirine karışmış, cümle tamamlanmamış)? Eğer öyleyse düzeltilmiş, akıcı bir cümle üret.\n"
-        f"4. Eğer aday cümle yukarıdaki 3 kontrolden de geçiyorsa (tekrar değil, alakalı, akıcı) VE "
-        f"tamamen doğru ve kaliteliyse, SADECE '{SENTENCE_APPROVAL_TOKEN}' yaz.\n"
-        "5. Eğer cümlede bilgi hatası, anlatım bozukluğu veya eksiklik varsa (ama tekrar/alakasız "
-        "değilse), düzeltilmiş nihai cümleyi doğrudan yaz.\n"
-        "6. Asla açıklama, selamlama veya ek metin ekleme. Sadece onay token'ını, boş metni veya "
+        "4. DİL KONTROLÜ: Aday cümle, '[KULLANICI SORUSU]' ile AYNI dilde mi yazılmış? Kullanıcı "
+        "Türkçe sorduysa cümle SADECE Türkçe olmalı — eğer cümlede İngilizce (veya başka bir dil) "
+        "kelime/ifade varsa (örn. 'Hello!', 'Sure', 'Here is...'), cümleyi TAMAMEN Türkçeye çevirerek "
+        "düzeltilmiş halini üret; ASLA olduğu gibi onaylama.\n"
+        f"5. Eğer aday cümle yukarıdaki 4 kontrolden de geçiyorsa (tekrar değil, alakalı, akıcı, doğru "
+        f"dilde) VE tamamen doğru ve kaliteliyse, SADECE '{SENTENCE_APPROVAL_TOKEN}' yaz.\n"
+        "6. Eğer cümlede bilgi hatası, anlatım bozukluğu, dil hatası veya eksiklik varsa (ama tekrar/"
+        "alakasız değilse), düzeltilmiş nihai cümleyi doğrudan yaz.\n"
+        "7. Asla açıklama, selamlama veya ek metin ekleme. Sadece onay token'ını, boş metni veya "
         "düzeltilmiş cümlenin kendisini döndür."
     )
 
@@ -236,9 +240,20 @@ async def run_sentence_relay_round(
     logger.info(f"--- Cümle-Bazlı Relay Döngüsü Başlıyor (Tur: {turn_index}) ---")
     round_start = time.monotonic()
 
+    # KALİTE DÜZELTMESİ (canlı site testinde bulundu): "Türkçe cevap ver" talimatı tek
+    # başına yeterli olmadı — küçük çırak model (0.5B) "Merhaba" gibi Türkçe bir mesaja
+    # bazen "Hello!" gibi İngilizce cevap üretti. Talimat artık DAHA VURGULU ve AÇIK: hem
+    # "SADECE Türkçe" diye net bir kısıtlama hem de "kullanıcı hangi dilde yazdıysa O dilde
+    # cevap ver" genel kuralı eklendi (ileride başka bir dilde soru gelirse diye). İkinci
+    # savunma katmanı olarak usta modelin değerlendirme kuralına da bir dil kontrolü eklendi
+    # (aşağıda relay_sentence_to_usta içinde).
     draft_system_prompt = (
         "Sen Cyber AI projesinin 'Çırak' (Draft) modelisin. Görevin, kullanıcının sorusuna "
-        "hızlı, ham ve kapsamlı bir ilk taslak cevap üretmektir. Türkçe cevap ver."
+        "hızlı, ham ve kapsamlı bir ilk taslak cevap üretmektir. "
+        "DİL KURALI (KESİN VE ZORUNLU): Kullanıcının mesajı hangi dildeyse SEN DE O DİLDE "
+        "cevap vermelisin. Kullanıcı Türkçe yazdıysa cevabın SADECE VE TAMAMEN Türkçe olmalı "
+        "— tek bir İngilizce kelime/cümle bile ekleme (örn. 'Hello!', 'Sure', 'Here is...' gibi "
+        "İngilizce ifadelerle BAŞLAMA veya bunları KULLANMA)."
     )
     
     draft_messages = (

@@ -303,7 +303,10 @@ async def run_draft_critique_round(
     draft_system_prompt = (
         "Sen Cyber AI projesinin 'Çırak' (Draft) modelisin. Görevin, kullanıcının sorusuna "
         "hızlı, ham ve kapsamlı bir ilk taslak cevap üretmektir. Mükemmel olmaya çalışma, "
-        "detayları usta modele bırak. Türkçe cevap ver."
+        "detayları usta modele bırak. "
+        "DİL KURALI (KESİN VE ZORUNLU): Kullanıcının mesajı hangi dildeyse SEN DE O DİLDE "
+        "cevap vermelisin. Kullanıcı Türkçe yazdıysa cevabın SADECE VE TAMAMEN Türkçe olmalı "
+        "— tek bir İngilizce kelime/cümle bile ekleme."
     )
     
     draft_messages = (
@@ -374,12 +377,15 @@ async def run_draft_critique_round(
         "4. HAM VERİ KONTROLÜ: Web arama sonuçları (varsa) ham başlık+snippet listesi olarak Shared "
         "Context'te bulunur — bunları OLDUĞU GİBİ kopyalayıp yapıştırma. Eğer taslak, web arama "
         "sonuçlarını işlenmemiş/anlamsız parçalar halinde (yarım cümle, başlık-snippet karışımı, "
-        "tutarsız liste öğeleri) sunuyorsa, bunları GERÇEK VE OKUNABILIR cümlelere dönüştürerek özetle.\n\n"
-        "Eğer taslak yukarıdaki 4 kontrolden de geçiyorsa VE tamamen doğru, eksiksiz ve mükemmelse, "
+        "tutarsız liste öğeleri) sunuyorsa, bunları GERÇEK VE OKUNABILIR cümlelere dönüştürerek özetle.\n"
+        "5. DİL KONTROLÜ: Taslak, kullanıcının sorusuyla AYNI dilde mi yazılmış? Kullanıcı Türkçe "
+        "sorduysa taslak SADECE Türkçe olmalı — eğer taslakta İngilizce (veya başka bir dil) kelime/"
+        "cümle varsa, TAMAMEN Türkçeye çevirerek düzeltilmiş halini üret; ASLA olduğu gibi onaylama.\n\n"
+        "Eğer taslak yukarıdaki 5 kontrolden de geçiyorsa VE tamamen doğru, eksiksiz ve mükemmelse, "
         f"cevabına SADECE VE SADECE '{APPROVAL_TOKEN}' yazarak onay ver. Ekstra hiçbir açıklama ekleme.\n"
-        "Eğer taslakta düzeltilmesi gereken yerler varsa (tekrar, alakasızlık, ham veri, hata, eksiklik "
-        "fark etmez), düzeltilmiş nihai cevabı doğrudan üret — ASLA APPROVAL_TOKEN ile birlikte hatalı "
-        "içerik verme."
+        "Eğer taslakta düzeltilmesi gereken yerler varsa (tekrar, alakasızlık, ham veri, dil hatası, "
+        "hata, eksiklik fark etmez), düzeltilmiş nihai cevabı doğrudan üret — ASLA APPROVAL_TOKEN ile "
+        "birlikte hatalı içerik verme."
     )
 
     # Kuyruktan gelen verileri canlı olarak okuyoruz

@@ -335,6 +335,36 @@ def is_likely_trivial(user_message: str) -> bool:
     return False
 
 
+def _truncate_at_boundary(text: str, max_chars: int) -> str:
+    """
+    Bir metni max_chars sınırına göre keser, AMA ASLA bir kelimenin/cümlenin ortasından
+    kesmez. Önce max_chars içinde bir cümle sonu noktalama işareti (. ! ?) aramaya çalışır
+    (en yakın cümle sonunda keser); bulamazsa en azından bir BOŞLUK karakterinde (kelime
+    sınırında) keser; o da yoksa (tek kelimelik aşırı uzun bir string gibi) düz kesmeye
+    geri döner. Web arama (Tavily) snippet/title alanlarının kelime ortasında kesilip
+    küçük çırak modelin bu yarım metni fark etmeden cevaba kopyalamasını önlemek için
+    eklendi (canlı site testinde bulunan bir kalite sorunu).
+    """
+    if len(text) <= max_chars:
+        return text
+
+    window = text[:max_chars]
+
+    # 1. Öncelik: bir cümle sonu noktalama işareti ara (sondan başa doğru)
+    for punct in (". ", "! ", "? ", ".\n", "!\n", "?\n"):
+        idx = window.rfind(punct)
+        if idx != -1 and idx > max_chars * 0.4:  # çok kısa bir kırpma olmasın diye asgari oran
+            return window[: idx + 1].strip()
+
+    # 2. İkinci öncelik: bir kelime sınırında (boşlukta) kes
+    idx = window.rfind(" ")
+    if idx != -1 and idx > max_chars * 0.4:
+        return window[:idx].strip() + "…"
+
+    # 3. Son çare: düz kesme (tek kelimelik aşırı uzun bir token ise)
+    return window.strip() + "…"
+
+
 @app.post("/web_search", response_model=WebSearchResponse)
 async def web_search(request: WebSearchRequest):
     """
@@ -389,9 +419,18 @@ async def web_search(request: WebSearchRequest):
             # prompt işleme süresi token sayısıyla orantılı) giden toplam prompt boyutunu
             # küçültüp gecikmeyi azaltmak. 350 karakter çoğu güncel bilgi (kur, hava durumu,
             # haber özeti) için hâlâ yeterli bağlam sağlar.
+            #
+            # KALİTE DÜZELTMESİ (canlı site testinde bulundu): Önceden düz `[:N]` karakter
+            # kesme kullanılıyordu — bu, bir cümlenin/kelimenin TAM ORTASINDAN kesebiliyordu
+            # (örn. "14 ülkenin destek verdiğ" gibi yarım bir kelimeyle bitiyordu). Küçük
+            # çırak model (0.5B) bu yarım kalan metni FARK ETMEDEN olduğu gibi cevaba
+            # kopyalıyordu, bu da anlamsız/yarım cümlelere yol açıyordu. Artık kesme işlemi
+            # `_truncate_at_boundary` ile YAPILIYOR: önce bir cümle sonunda (. ! ?) kesmeye
+            # çalışır, bulamazsa en azından bir KELİME sınırında keser — asla kelime ortasında
+            # kesmez.
             results.append(WebSearchResult(
-                title=title[:300],
-                snippet=snippet[:350],
+                title=_truncate_at_boundary(title, 300),
+                snippet=_truncate_at_boundary(snippet, 350),
                 url=url
             ))
 
