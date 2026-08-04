@@ -88,14 +88,15 @@ Eğer paralel mod denenecekse, çekişmeyi azaltmak için iki seçenek `cyber-ll
 
 ### Prompt Caching (Sistematikleştirme)
 
-`SharedContext.to_system_blocks()` her turda BYTE-BİREBİR AYNI metni üretir (RAG+web verisi bir kez çekilip tüm turlarda tekrar kullanılır) — bu, llama.cpp'nin `--prompt-cache`, `--prompt-cache-all` ve `--cache-reuse` bayraklarının tam olarak hedeflediği kullanım şeklidir. Önceki oturumda gözlemlenen 281ms sıcak-başlangıç düşüşü kısmen bu mekanizmanın zaten çalıştığını gösteriyor; `cyber-llama-draft.service.example` ve `cyber-llama-usta.service.example` dosyaları bunu SİSTEMATİK (her restart'ta kalıcı, disk üzerinde) hale getirmek için gerekli tam yapılandırmayı içerir.
+`SharedContext.to_system_blocks()` her turda BYTE-BİREBİR AYNI metni üretir (RAG+web verisi bir kez çekilip tüm turlarda tekrar kullanılır) — bu, llama.cpp'nin `--cache-reuse` bayrağının tam olarak hedeflediği kullanım şeklidir (`--cache-prompt` zaten varsayılan olarak açıktır). Önceki oturumda gözlemlenen 281ms sıcak-başlangıç düşüşü kısmen bu mekanizmanın zaten çalıştığını gösteriyor; `cyber-llama-draft.service.example` ve `cyber-llama-usta.service.example` dosyaları bunu SİSTEMATİK (her restart'ta kalıcı) hale getirmek için gerekli tam yapılandırmayı içerir.
+**DÜZELTME NOTU:** `--prompt-cache`/`--prompt-cache-all` bayrakları önceki bir sürümde hatalı önerilmişti — llama-server bu bayrakları desteklemez (llama-cli'ye özeldir), "invalid argument" hatası verir. Doğru bayrak sadece `--cache-reuse`'dur, yukarıdaki iki `.service.example` dosyası bu şekilde güncellenmiştir.
 
 ### Yeni Dosyalar
 
 - `collab_orchestrator.py` — Çırak-Usta streaming (token-stream) pipeline'ın tüm mantığı.
 - `benchmark_cpu_contention.sh` — CPU çekişmesini ölçen benchmark betiği (sunucuda manuel çalıştırılır).
-- `cyber-llama-draft.service.example` — Çırak servisi için Nice/taskset + prompt-cache örnek systemd yapılandırması.
-- `cyber-llama-usta.service.example` — Usta servisi için prompt-cache + speculative decoding örnek systemd yapılandırması.
+- `cyber-llama-draft.service.example` — Çırak servisi için Nice/taskset + cache-reuse örnek systemd yapılandırması.
+- `cyber-llama-usta.service.example` — Usta servisi için cache-reuse + speculative decoding örnek systemd yapılandırması.
 
 ---
 

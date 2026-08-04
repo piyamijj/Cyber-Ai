@@ -12,9 +12,14 @@
 # (manuel bir kabuk komutu mu, ayrı bir systemd servisi mi, yoksa tmux/screen oturumu mu)
 # repoda buna dair bir dosya bulunmadığı için tam olarak bilemiyoruz.
 # Bu nedenle, eğer halihazırda bir systemd servisi kullanmıyorsanız bu dosyayı bir
-# geçiş rehberi olarak kullanmanızı; eğer kullanıyorsanız, buradaki '--prompt-cache',
-# '--prompt-cache-all' ve '--cache-reuse' bayraklarını mevcut başlatma komutunuza
-# eklemenizi öneririz. 14B sunucusunu nasıl başlattığınızdan emin değilseniz lütfen bize bildirin.
+# geçiş rehberi olarak kullanmanızı; eğer kullanıyorsanız, buradaki '--cache-reuse'
+# bayrağını mevcut başlatma komutunuza eklemenizi öneririz. 14B sunucusunu nasıl
+# başlattığınızdan emin değilseniz lütfen bize bildirin.
+#
+# DÜZELTME (kritik hata, önceki sürümde vardı): '--prompt-cache' ve '--prompt-cache-all'
+# bayrakları llama-server TARAFINDAN DESTEKLENMEZ (bunlar llama-cli'ye özeldir, sunucu
+# bu bayrakları görünce "invalid argument" hatasıyla başlamayı reddeder). Bu dosyanın
+# güncel hali SADECE '--cache-reuse'u kullanır.
 # =====================================================================================
 
 [Unit]
@@ -50,11 +55,11 @@ WorkingDirectory=/home/ubuntu
 #   DİKKAT: Bu spekülatif kod çözme kullanımı, yeni mimarideki port 8088'de çalışan bağımsız
 #   'Çırak' sohbet sürecinden tamamen farklı ve bağımsızdır. Aynı model dosyası (.gguf)
 #   sunucuda iki farklı amaçla iki ayrı süreç tarafından yüklenir.
-# --prompt-cache: Ortak sistem talimatları ve Shared Context (RAG/Web) doküman paketini
-#   disk üzerinde önbelleğe kaydeder.
-# --prompt-cache-all: Tüm prompt'u önbelleğe dahil eder.
-# --cache-reuse: Önceki turlardan kalan KV-cache parçalarını, prompt kısmen değişse bile
-#   (örneğin usta eleştirisi eklendiğinde) akıllıca yeniden kullanır.
+# --cache-reuse N: KV-shifting ile önbellekten yeniden kullanılacak minimum parça
+#   boyutu. Önceki turlardan kalan KV-cache parçalarını, prompt kısmen değişse bile
+#   (örneğin usta eleştirisi eklendiğinde) akıllıca yeniden kullanır. Shared Context
+#   ortak öneki (RAG+Web verisi, her turda byte-birebir aynı) bu sayede tekrar
+#   hesaplanmaz. (--cache-prompt zaten VARSAYILAN OLARAK AÇIKTIR, belirtmeye gerek yok.)
 # -t 4: Usta modelin 4 CPU çekirdeğinin tamamını (thread) kullanmasını sağlar.
 ExecStart=/home/ubuntu/llama.cpp/build/bin/llama-server \
   -m /home/ubuntu/models/qwen2.5-14b.gguf \
@@ -62,8 +67,6 @@ ExecStart=/home/ubuntu/llama.cpp/build/bin/llama-server \
   --port 8082 \
   --host 0.0.0.0 \
   -c 8192 \
-  --prompt-cache /home/ubuntu/llama-cache/usta-cache.bin \
-  --prompt-cache-all \
   --cache-reuse 256 \
   -t 4
 
@@ -82,20 +85,19 @@ WantedBy=multi-user.target
 #    Yeni mimaride 'collab_orchestrator.py' içindeki 'SharedContext.to_system_blocks()'
 #    fonksiyonu, tek bir kullanıcı isteğinin tüm turları (Çırak Tur 1, Usta Tur 1, Çırak Tur 2,
 #    Usta Tur 2) boyunca tamamen AYNI sistem mesajı bloklarını (RAG ve Web Arama verileri)
-#    üretir. Bu byte-birebir aynı olan ön ek (prefix), '--prompt-cache' ve '--cache-reuse'
-#    özelliklerinin tam olarak yararlanması için tasarlanmıştır. Bu sayede 2. turda usta model
-#    bağlamı baştan hesaplamaz, sıcak başlangıç (warm-start) süresi 281ms seviyesine düşer.
+#    üretir. Bu byte-birebir aynı olan ön ek (prefix), '--cache-reuse' özelliğinin tam
+#    olarak yararlanması için tasarlanmıştır. Bu sayede 2. turda usta model bağlamı
+#    baştan hesaplamaz, sıcak başlangıç (warm-start) süresi 281ms seviyesine düşer.
 #
 # 2. --cache-reuse Parametresi Hakkında:
-#    '--cache-reuse' bayrağı llama.cpp'nin güncel sürümlerinde bulunan çok güçlü bir özelliktir.
-#    Eğer servisi başlatırken "unknown argument" hatası alırsanız, sunucunuzdaki llama.cpp
-#    sürümü eski olabilir. Bu durumda:
-#      a) Bu bayrağı komuttan kaldırıp sadece '--prompt-cache' ile devam edebilirsiniz.
+#    '--cache-reuse' bayrağı llama.cpp'nin güncel sürümlerinde bulunan bir özelliktir.
+#    Eğer servisi başlatırken "unknown argument" veya "invalid argument" hatası alırsanız:
+#      a) Önce llama-server --help | grep cache-reuse ile bu bayrağın sürümünüzde
+#         olup olmadığını kontrol edin — yoksa bu bayrağı komuttan kaldırıp devam edin
+#         (prompt caching --cache-prompt ile zaten VARSAYILAN OLARAK AÇIKTIR).
 #      b) Veya llama.cpp klasörünüze gidip güncelleyerek yeniden derleyebilirsiniz:
 #         git pull && cmake --build build --config Release -j$(nproc)
-#
-# 3. llama-cache Klasörünü Oluşturun:
-#    Önbellek dosyasının yazılacağı klasörün mevcut olduğundan emin olun:
-#    mkdir -p /home/ubuntu/llama-cache
-#    chmod 755 /home/ubuntu/llama-cache
+#    NOT: '--prompt-cache' / '--prompt-cache-all' bayraklarını KULLANMAYIN — bunlar
+#    llama-cli'ye özeldir, llama-server bunları desteklemez ve "invalid argument"
+#    hatasıyla başlamayı reddeder.
 # =====================================================================================

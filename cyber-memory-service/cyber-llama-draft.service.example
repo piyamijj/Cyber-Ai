@@ -10,7 +10,7 @@
 # ----------------
 # 1. Sunucunuzdaki mevcut servis dosyasını açın:
 #    sudo nano /etc/systemd/system/cyber-llama-draft.service
-# 2. Aşağıdaki 'Nice=' satırını ve 'ExecStart' içindeki prompt-cache parametrelerini
+# 2. Aşağıdaki 'Nice=' satırını ve 'ExecStart' içindeki cache-reuse parametrelerini
 #    kendi dosyanıza entegre edin (dosya yollarını kendi sunucunuza göre doğrulayın).
 # 3. Servisi yeniden yükleyin ve başlatın:
 #    sudo systemctl daemon-reload
@@ -50,10 +50,16 @@ Nice=10
 # -------------------------------------------------------------------------------------
 # PROMPT CACHING VE BAŞLATMA PARAMETRELERİ
 # -------------------------------------------------------------------------------------
-# --prompt-cache: Ortak sistem talimatları ve Shared Context (RAG/Web) doküman paketini
-#   disk üzerinde önbelleğe kaydeder. Aynı bağlam tekrar geldiğinde (örneğin usta eleştirisi
-#   sonrası 2. turda), llama.cpp bu token'ları yeniden hesaplamaz (0ms'ye yakın sürede işler).
-# --prompt-cache-all: Tüm prompt'u önbelleğe dahil eder.
+# DÜZELTME (kritik hata): '--prompt-cache' ve '--prompt-cache-all' bayrakları
+# llama-server TARAFINDAN DESTEKLENMEZ — bunlar llama-cli'nin (tekli komut satırı aracı)
+# bayraklarıdır, sunucu bu bayrakları görünce "invalid argument" hatasıyla başlamayı
+# reddeder. llama-server'ın resmi dokümantasyonuna göre (tools/server/README.md) doğru
+# eşdeğerleri:
+# --cache-reuse N: KV-shifting ile önbellekten yeniden kullanılacak minimum parça
+#   boyutu. Ortak sistem talimatları ve Shared Context (RAG/Web) doküman paketi turlar
+#   arası AYNI kaldığı için, bu bayrak sayesinde llama.cpp bu ortak öneki (prefix) her
+#   turda yeniden hesaplamaz.
+# --cache-prompt zaten VARSAYILAN OLARAK AÇIKTIR, ayrıca belirtmeye gerek yoktur.
 # -t 2: Çırak modelin sadece 2 CPU çekirdeği (thread) kullanmasını sağlar. Bu, 4 OCPU'lu
 #   sunucuda usta modele her zaman en az 2 çekirdeklik boş alan bırakılmasını garanti eder.
 ExecStart=/home/ubuntu/llama.cpp/build/bin/llama-server \
@@ -61,8 +67,7 @@ ExecStart=/home/ubuntu/llama.cpp/build/bin/llama-server \
   --port 8088 \
   --host 0.0.0.0 \
   -c 4096 \
-  --prompt-cache /home/ubuntu/llama-cache/draft-cache.bin \
-  --prompt-cache-all \
+  --cache-reuse 256 \
   -t 2
 
 Restart=always
@@ -76,18 +81,14 @@ WantedBy=multi-user.target
 # =====================================================================================
 # PROMPT CACHING VE PERFORMANS NOTLARI:
 # -------------------------------------
-# 1. llama-cache Klasörünü Oluşturun:
-#    Servisi başlatmadan önce önbellek dosyasının yazılacağı klasörü oluşturun ve izin verin:
-#    mkdir -p /home/ubuntu/llama-cache
-#    chmod 755 /home/ubuntu/llama-cache
-#
-# 2. Usta Model (14B, Port 8082) İçin Öneri:
+# 1. Usta Model (14B, Port 8082) İçin Öneri:
 #    Usta modelinizin kendi systemd servisinde veya başlatma scriptinde de benzer şekilde
-#    --prompt-cache /home/ubuntu/llama-cache/usta-cache.bin ve --prompt-cache-all
-#    parametrelerini kullanmanız, usta modelin de Shared Context'i her turda baştan
-#    hesaplamasını önleyerek sıcak başlangıç süresini (warm-start) 281ms seviyesine düşürür.
+#    --cache-reuse 256 parametresini kullanmanız, usta modelin de Shared Context'i her
+#    turda baştan hesaplamasını önleyerek sıcak başlangıç süresini (warm-start) 281ms
+#    seviyesine düşürür. (--prompt-cache/--prompt-cache-all KULLANMAYIN — llama-server
+#    bu bayrakları desteklemez, "invalid argument" hatası verir; bunlar llama-cli'ye özeldir.)
 #
-# 3. Thread Sayısı (-t):
+# 2. Thread Sayısı (-t):
 #    4 OCPU sunucuda, Çırak için '-t 2', Usta için ise '-t 4' (veya Nice=10 ile serbest)
 #    kullanılması en dengeli performansı sağlar.
 # =====================================================================================

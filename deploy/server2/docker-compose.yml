@@ -100,16 +100,25 @@ services:
     # -t 2: Çırak modelin sadece 2 CPU çekirdeği (thread) kullanmasını sağlar.
     #   Sunucu 2'de aynı zamanda Qdrant veritabanı da çalışacağı için, çırak modelin tüm CPU'yu
     #   (4 çekirdeği) sömürmesini engelleyerek Qdrant'a nefes alacak alan bırakıyoruz.
-    # --prompt-cache /llama-cache/draft-cache.bin: Önbellek dosyasının yazılacağı yol.
-    # --prompt-cache-all: Tüm prompt'u önbelleğe dahil eder.
+    # DÜZELTME (kritik hata): '--prompt-cache' ve '--prompt-cache-all' bayrakları
+    # llama-server TARAFINDAN DESTEKLENMİYOR — bunlar llama-cli'nin (komut satırı aracı)
+    # bayraklarıdır, sunucu (llama-server) FARKLI bir mekanizma kullanır. Bu, kullanıcının
+    # aldığı "invalid argument: --prompt-cache" hatasının kök nedenidir. llama-server'ın
+    # resmi dokümantasyonuna göre (tools/server/README.md) gerçek eşdeğerleri:
+    #   --cache-prompt (varsayılan olarak ZATEN AÇIK — prompt caching otomatik çalışır,
+    #     bu bayrağı hiç belirtmeye gerek yoktur, sadece kapatmak isterseniz --no-cache-prompt
+    #     kullanılır)
+    #   --cache-reuse N (KV-shifting ile önbellekten yeniden kullanılacak minimum parça
+    #     boyutu — Shared Context'in turlar arası tekrar kullanılmasını sağlayan asıl bayrak)
+    #   --slot-save-path PATH (isteğe bağlı disk üzerinde slot kaydı — bu projede şimdilik
+    #     gerekli değil, prompt caching zaten bellek içinde/slot bazlı otomatik çalışıyor)
     command: >
       llama-server 
       -m /models/qwen2.5-0.5b-instruct-q4_k_m.gguf 
       --port 8088 
       --host 0.0.0.0 
       -c 4096 
-      --prompt-cache /llama-cache/draft-cache.bin 
-      --prompt-cache-all 
+      --cache-reuse 256 
       -t 2
     restart: unless-stopped
     # Qdrant ile doğrudan bir kod bağımlılığı yoktur (Hafıza servisi ikisiyle de ayrı ayrı konuşur),
