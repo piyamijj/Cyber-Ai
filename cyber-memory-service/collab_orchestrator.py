@@ -54,6 +54,29 @@ REPEAT_PENALTY = float(os.getenv("COLLAB_REPEAT_PENALTY", "1.05"))
 # Cezanın geriye kaç token'a uygulanacağını belirler (son N token içinde tekrar aranır).
 REPEAT_LAST_N = int(os.getenv("COLLAB_REPEAT_LAST_N", "64"))
 
+# DRY ("Don't Repeat Yourself") SAMPLING — KALİTE DÜZELTMESİ (canlı site testinde bulundu,
+# BÜYÜK BLOK/SONSUZ DÖNGÜ REGRESYONU): repeat_penalty + repeat_last_n=64 düzeltmesinden
+# SONRA yeni bir regresyon ortaya çıktı — çırak model (0.5B) bir haber sorgusunda AYNI
+# BÜYÜK BLOĞU (birkaç haber başlığı + kendi aldığı talimat metninin bir parçası) ART ARDA,
+# DURMADAN (EOS token'ı üretmeden) max_tokens (2048) sınırına kadar tekrar tekrar üretti.
+# KÖK NEDEN: repeat_penalty/repeat_last_n TEK TEK TOKEN'LARA bakan "kaba" bir mekanizmadır
+# ve repeat_last_n=64 gibi DAR bir pencere, birkaç yüz token uzunluğundaki BÜYÜK bir tekrar
+# BLOĞUNU tespit edip cezalandıramaz (pencere bloğun tamamını kapsayacak kadar geniş değil).
+# repeat_last_n'i çok büyütmek ise ÖNCEKİ regresyonu (256 iken yaygın/yapısal kelimelerin
+# cezalandırılıp modelin uydurma kelime üretmesi) GERİ GETİRME riski taşır — bu yüzden
+# repeat_last_n'i büyütmek yerine, TAM OLARAK bu senaryo için tasarlanmış farklı bir
+# mekanizma ekliyoruz: DRY sampling (web_search ile llama.cpp resmi dokümantasyonu ve
+# blog.alexewerlof.com/p/sampling-args-in-llama-server doğrulandı). DRY, tek tek token
+# yerine TOKEN DİZİLERİNİ (sequences) izler — büyük bir metin bloğunun TEKRARINI, o bloğun
+# içindeki münferit kelimelere dokunmadan (gramer/kelime seçimini bozmadan) engeller. Küçük
+# modellerdeki (SLM) "probability collapse" / sonsuz döngü hatası için llama.cpp'nin resmi
+# önerisi tam olarak budur. dry_multiplier varsayılan olarak 0.0 (kapalı) geldiği için
+# önceki tüm turlarda bu savunma hiç aktif değildi — repeat_penalty'nin yakalayamadığı bu
+# büyük-blok tekrarını DRY'nin yakalaması bekleniyor.
+DRY_MULTIPLIER = float(os.getenv("COLLAB_DRY_MULTIPLIER", "0.8"))  # llama.cpp topluluk best-practice değeri (0.0 = kapalı)
+DRY_BASE = float(os.getenv("COLLAB_DRY_BASE", "1.75"))  # llama.cpp resmi varsayılanı
+DRY_ALLOWED_LENGTH = int(os.getenv("COLLAB_DRY_ALLOWED_LENGTH", "2"))  # llama.cpp resmi varsayılanı — bundan uzun tekrar eden dizilere ceza uygulanır
+
 # Türkçe'de anlamsal ağırlığı neredeyse hiç olmayan, RAG kelime-örtüşüm kontrolünde
 # yok sayılacak "stop word" listesi (yaygın bağlaçlar, edatlar, zamirler).
 _TURKISH_STOPWORDS = {
@@ -340,7 +363,10 @@ async def stream_llm_to_queue(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "repeat_penalty": REPEAT_PENALTY,
-        "repeat_last_n": REPEAT_LAST_N
+        "repeat_last_n": REPEAT_LAST_N,
+        "dry_multiplier": DRY_MULTIPLIER,
+        "dry_base": DRY_BASE,
+        "dry_allowed_length": DRY_ALLOWED_LENGTH
     }
     if stop:
         payload["stop"] = stop
@@ -553,7 +579,10 @@ async def run_draft_critique_round(
                         "max_tokens": 2048,
                         "stream": False,
                         "repeat_penalty": REPEAT_PENALTY,
-                        "repeat_last_n": REPEAT_LAST_N
+                        "repeat_last_n": REPEAT_LAST_N,
+                        "dry_multiplier": DRY_MULTIPLIER,
+                        "dry_base": DRY_BASE,
+                        "dry_allowed_length": DRY_ALLOWED_LENGTH
                     },
                     timeout=150.0
                 )
@@ -600,7 +629,10 @@ async def run_draft_critique_round(
                     "max_tokens": 2048,
                     "stream": False,
                     "repeat_penalty": REPEAT_PENALTY,
-                    "repeat_last_n": REPEAT_LAST_N
+                    "repeat_last_n": REPEAT_LAST_N,
+                    "dry_multiplier": DRY_MULTIPLIER,
+                    "dry_base": DRY_BASE,
+                    "dry_allowed_length": DRY_ALLOWED_LENGTH
                 },
                 timeout=150.0
             )

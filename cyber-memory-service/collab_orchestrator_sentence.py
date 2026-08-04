@@ -15,7 +15,10 @@ from collab_orchestrator import (
     MAX_REVISION_TURNS,
     APPROVAL_TOKEN,
     REPEAT_PENALTY,
-    REPEAT_LAST_N
+    REPEAT_LAST_N,
+    DRY_MULTIPLIER,
+    DRY_BASE,
+    DRY_ALLOWED_LENGTH
 )
 
 # 1. LOGGING AYARLARI
@@ -180,7 +183,10 @@ async def relay_sentence_to_usta(
                 "max_tokens": 256,   # Tek bir cümle için fazlasıyla yeterli
                 "stream": False,
                 "repeat_penalty": REPEAT_PENALTY,
-                "repeat_last_n": REPEAT_LAST_N
+                "repeat_last_n": REPEAT_LAST_N,
+                "dry_multiplier": DRY_MULTIPLIER,
+                "dry_base": DRY_BASE,
+                "dry_allowed_length": DRY_ALLOWED_LENGTH
             },
             timeout=60.0
         )
@@ -332,6 +338,16 @@ async def run_sentence_relay_round(
     # tutarsız/yaratıcı ama YANLIŞ birleşimler üretmesi riskini artırır. 0.1-0.2 kadar
     # agresif düşürülmedi (çırağın "hızlı ham taslak" rolü tamamen katılaşmasın diye),
     # ama önceki 0.6'dan belirgin şekilde daha düşük, dengeli bir değer seçildi.
+    # KALİTE DÜZELTMESİ (canlı site testinde bulundu — BÜYÜK BLOK/SONSUZ DÖNGÜ REGRESYONU):
+    # repeat_penalty/repeat_last_n düzeltmesinden SONRA çırak model bir haber sorgusunda
+    # AYNI BÜYÜK BLOĞU (birkaç haber başlığı + talimat metni parçası) durmadan tekrar tekrar
+    # üretti (EOS token'ı hiç gelmedi, max_tokens sınırına kadar gitti). Kök neden:
+    # repeat_penalty/repeat_last_n=64 SADECE tek tek token'lara bakan dar bir pencere ile
+    # çalışır — birkaç yüz token uzunluğundaki bir BLOĞUN tekrarını göremez/cezalandıramaz.
+    # DRY (Don't Repeat Yourself) sampling eklendi — bkz. collab_orchestrator.py'deki
+    # DRY_MULTIPLIER/DRY_BASE/DRY_ALLOWED_LENGTH tanımlarının detaylı açıklaması. DRY, TOKEN
+    # DİZİLERİNİN (sequences) tekrarını tespit edip cezalandırır — tam olarak bu "büyük blok
+    # döngüye girme" hatası için llama.cpp'nin resmi/topluluk önerisi budur.
     endpoint = f"{draft_url}/v1/chat/completions"
     payload = {
         "model": draft_model_name,
@@ -340,7 +356,10 @@ async def run_sentence_relay_round(
         "temperature": 0.3,
         "max_tokens": 2048,
         "repeat_penalty": REPEAT_PENALTY,
-        "repeat_last_n": REPEAT_LAST_N
+        "repeat_last_n": REPEAT_LAST_N,
+        "dry_multiplier": DRY_MULTIPLIER,
+        "dry_base": DRY_BASE,
+        "dry_allowed_length": DRY_ALLOWED_LENGTH
     }
 
     draft_text = ""
@@ -477,7 +496,38 @@ async def run_sentence_relay_round(
     # NOT: Usta, tekrarlayan bir cümleyi tespit ettiğinde boş string ("") döndürür (bkz.
     # relay_sentence_to_usta'daki tekrar kontrolü guardrail'i) — bu cümleyi burada filtreleyip
     # birleştiriyoruz, aksi halde fazladan boşluklar nihai metinde görünür hale gelirdi.
-    assembled_text = " ".join(s for s in final_sentences if s.strip())
+    #
+    # SON ÇARE KOD-SEVİYESİ GÜVENLİK AĞI (canlı site testinde bulundu — BÜYÜK BLOK/SONSUZ
+    # DÖNGÜ REGRESYONU): DRY sampling + repeat_penalty birincil savunma katmanıdır (üretim
+    # anında döngüyü engellemeye çalışır), usta'nın Rule 1 tekrar kontrolü ikincil katmandır
+    # (cümle bazlı, izole değerlendirme). AMA usta'nın değerlendirmeleri PARALEL/asenkron
+    # çalıştığı için (her cümle ayrı bir asyncio.create_task), teorik olarak zamanlama
+    # koşullarında (race condition) bir tekrar gözden kaçabilir. Bu yüzden nihai metni
+    # BİRLEŞTİRMEDEN HEMEN ÖNCE, tamamen deterministik, LLM'e bağımlı olmayan bir ÜÇÜNCÜ
+    # katman ekliyoruz: normalize edilmiş (boşluk/büyük-küçük harf farkı yok sayılarak)
+    # metni daha önce görülmüş bir cümleyle BİREBİR AYNIYSA, o cümleyi nihai cevaptan
+    # SESSİZCE çıkarıyoruz. Bu, kullanıcının gördüğü "aynı 4 haber + talimat metni tekrar
+    # tekrar" görüntüsünün son çare güvencesidir.
+    seen_normalized = set()
+    deduped_sentences = []
+    duplicate_count = 0
+    for s in final_sentences:
+        if not s.strip():
+            continue
+        normalized = " ".join(s.strip().lower().split())
+        if normalized in seen_normalized:
+            duplicate_count += 1
+            continue
+        seen_normalized.add(normalized)
+        deduped_sentences.append(s)
+    if duplicate_count > 0:
+        logger.warning(
+            f"SON ÇARE GÜVENLİK AĞI: Nihai cevapta {duplicate_count} adet BİREBİR TEKRAR EDEN "
+            f"cümle tespit edilip çıkarıldı (DRY/repeat_penalty ve usta'nın tekrar kontrolü "
+            f"bu tekrarı önleyemedi) — bu, çırak modelin döngüye girdiğine dair bir sinyaldir, "
+            f"örnek/loglar incelenmelidir."
+        )
+    assembled_text = " ".join(deduped_sentences)
     total_sentences = len(candidate_sentences)
     rejection_ratio = (rejected_count / total_sentences) if total_sentences > 0 else 0.0
 
