@@ -6,15 +6,29 @@
   color-scheme: dark;
 }
 
+/* KALİTE DÜZELTMESİ (canlı site mobil testinde bulundu): viewport meta tag eksikliğinin
+   (bkz. layout.tsx) yanında, ek bir savunma katmanı olarak box-sizing'i tüm elemanlara
+   açıkça garanti ediyoruz (Tailwind preflight bunu zaten yapar, ama ekstra bir güvenlik
+   ağı olarak burada da net bir şekilde belirtiliyor) — bir elemanın padding/border'ının
+   genişliğe EKLENMESİ (content-box davranışı) mobilde beklenmedik yatay taşmaya yol açabilir. */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
 html,
 body {
   height: 100%;
+  width: 100%;
   margin: 0;
   padding: 0;
   background-color: #050508;
   color: #e2e8f0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   overflow: hidden;
+  /* Yatay taşmayı (overflow-x) her ihtimale karşı engelliyoruz — mesaj baloncukları veya
+     uzun/kesilmemiş bir kelime (URL, kod bloğu vb.) yanlışlıkla sayfayı genişletirse bile
+     sayfa kendisi yana kaymaz, sadece içerik kendi içinde sarılır/kesilir. */
+  overflow-x: hidden;
 }
 
 /* Custom thin scrollbar */

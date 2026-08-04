@@ -73,9 +73,15 @@ REALTIME_OVERRIDE_KEYWORDS = [
 SEARCH_TOP_K = int(os.getenv("SEARCH_TOP_K", "5"))
 # Cosine similarity için eşik değer. Alakasız geçmiş bilgileri elemek için kullanılır.
 # NOT: BAAI/bge-base-en-v1.5 İngilizce odaklı bir model olduğu için Türkçe metinlerde
-# gerçek eşleşmeler bile daha düşük skorlar üretebilir (ör. 0.3-0.5 aralığı). Bu yüzden
-# eşiği düşük tutuyoruz; çok fazla alakasız sonuç gelirse ileride yükseltilebilir.
-SEARCH_SCORE_THRESHOLD = float(os.getenv("SEARCH_SCORE_THRESHOLD", "0.2"))
+# gerçek eşleşmeler bile daha düşük skorlar üretebilir (ör. 0.3-0.5 aralığı).
+# KALİTE DÜZELTMESİ (canlı site testinde bulundu): 0.2 eşiği ÇOK GEVŞEKTİ — kullanıcı
+# 'Merhaba' yazdığında bile alakasız bir geçmiş hafıza kaydı ('Havva', 'güvenlik' konulu)
+# Shared Context'e sızıp modelin cevabını tamamen konu dışına kaydırdı. Eşik 0.2 -> 0.38
+# yükseltildi (Türkçe için hâlâ makul, gerçek eşleşmeleri kaçırmayacak kadar düşük ama
+# rastgele/alakasız kayıtları eleyecek kadar sıkı). Birincil savunma budur; ikincil
+# savunma ise Shared Context aşamasında kısa/trivial sorularda RAG'i hiç tetiklememek
+# (bkz. fetch_shared_context çağrısındaki is_likely_trivial kısayolu, main.py).
+SEARCH_SCORE_THRESHOLD = float(os.getenv("SEARCH_SCORE_THRESHOLD", "0.38"))
 
 # Web araması için varsayılan sonuç sayısı ve zaman aşımı
 WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "4"))
@@ -793,7 +799,8 @@ async def collab_stream(request: CollabRequest):
                 user_query=request.query,
                 memory_search_fn=_memory_search_adapter,
                 web_search_fn=_web_search_adapter,
-                decide_fn=_decide_adapter
+                decide_fn=_decide_adapter,
+                is_trivial_fn=is_likely_trivial
             )
             yield sse("shared_context_ready", {
                 "rag_used": bool(shared_context.rag_text),
@@ -895,7 +902,8 @@ async def collab_stream_sentence(request: CollabRequest):
                 user_query=request.query,
                 memory_search_fn=_memory_search_adapter,
                 web_search_fn=_web_search_adapter,
-                decide_fn=_decide_adapter
+                decide_fn=_decide_adapter,
+                is_trivial_fn=is_likely_trivial
             )
             yield sse("shared_context_ready", {
                 "rag_used": bool(shared_context.rag_text),
@@ -988,7 +996,8 @@ async def collab_compare(request: CollabRequest):
         user_query=request.query,
         memory_search_fn=_memory_search_adapter,
         web_search_fn=_web_search_adapter,
-        decide_fn=_decide_adapter
+        decide_fn=_decide_adapter,
+        is_trivial_fn=is_likely_trivial
     )
 
     # DÜZELTME (kalite/tanı sorunu): read timeout 200.0 -> 280.0'a yükseltildi. Token-stream

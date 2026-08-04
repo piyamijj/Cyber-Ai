@@ -93,32 +93,49 @@ async def relay_sentence_to_usta(
     """
     Çırağın ürettiği TEK BİR cümleyi değerlendirmesi için usta modele gönderir.
     
-    Usta model, bu cümleyi Shared Context (RAG ve Web Arama) verileri doğrultusunda
-    ve o ana kadar biriken cümlelerin bağlamsal akışına göre inceler.
+    Usta model, bu cümleyi Shared Context (RAG ve Web Arama) verileri, KULLANICININ ASIL
+    SORUSU ve o ana kadar biriken cümlelerin bağlamsal akışına göre inceler.
     """
     start_time = time.monotonic()
     
     # Usta modelin tek bir cümleyi değerlendirmesi için sistem talimatı
     #
-    # KALİTE GUARDRAIL'İ (kritik düzeltme): benchmark_architectures.sh testlerinde çırak
+    # KALİTE GUARDRAIL'İ 1 (tekrar kontrolü): benchmark_architectures.sh testlerinde çırak
     # modelin (0.5B) AYNI CÜMLEYİ 6-7 kez art arda ürettiği ve usta modelin bunu FARK
     # ETMEDEN her tekrarı ayrı ayrı "SENTENCE_OK" ile onayladığı gözlemlendi — çünkü usta
     # her cümleyi İZOLE değerlendiriyordu, "bu cümle önceki cümlelerle BİREBİR AYNI mı"
     # diye bakmıyordu. Kural 1'i (tekrar kontrolü) EN BAŞA ve EN VURGULU şekilde ekliyoruz.
+    #
+    # KALİTE GUARDRAIL'İ 2 (alakalılık kontrolü — canlı site testinde bulunan KRİTİK EKSİK):
+    # Kullanıcı canlı sitede "Bugünkü haber başlıklarından bana birkaçını ver" diye sorduğunda,
+    # usta modelin ÜRETTİĞİ nihai cevabın SONUNA tamamen alakasız bir "güvenlik" cümlesi
+    # eklendiği ve haber listesinin bozuk/anlamsız başlıklar içerdiği gözlemlendi. Kök neden:
+    # bu fonksiyon önceden usta modele KULLANICININ NE SORDUĞUNU HİÇ BİLDİRMİYORDU — usta
+    # her cümleyi sadece "önceki cümleler" bağlamıyla, sorudan bağımsız olarak değerlendiriyordu.
+    # Bu yüzden usta, konu dışı/alakasız bir cümleyi ASLA yakalayamazdı (yakalayacak bir
+    # referansı yoktu). Düzeltme: (a) kullanıcının asıl sorusu artık [KULLANICI SORUSU] bloğu
+    # olarak usta'ya iletiliyor, (b) Kural 2 olarak açık bir ALAKALILIK kontrolü eklendi.
     usta_sentence_system_prompt = (
         "Sen Cyber AI projesinin 'Usta' (Critique/Editor) modelisin. Görevin, çırak modelin ürettiği "
-        "tek bir aday cümleyi, Shared Context (RAG ve Web Arama) verileri ve o ana kadar yazılmış "
-        "önceki cümlelerin akışı doğrultusunda titizlikle incelemektir.\n\n"
+        "tek bir aday cümleyi, KULLANICININ ASIL SORUSU, Shared Context (RAG ve Web Arama) verileri "
+        "ve o ana kadar yazılmış önceki cümlelerin akışı doğrultusunda titizlikle incelemektir.\n\n"
         "KURALLAR (SIRAYLA UYGULA):\n"
         "1. TEKRAR KONTROLÜ (ÖNCELİKLİ): Aday cümle, '[ÖNCEKİ CÜMLELER]' listesindeki herhangi bir "
         "cümleyle BİREBİR AYNI veya ANLAMCA NEREDEYSE AYNI mı? Eğer öyleyse bu bir model hatasıdır "
         "(dejenere/repetition çıktı) — ASLA SENTENCE_OK ile onaylama. Bunun yerine BOŞ bir metin "
         "('') döndür (bu, bu tekrarlanan cümlenin nihai cevaptan tamamen çıkarılacağı anlamına gelir).\n"
-        f"2. Eğer aday cümle tekrar değilse VE tamamen doğru, bağlama uygun ve kaliteliyse, SADECE "
-        f"'{SENTENCE_APPROVAL_TOKEN}' yaz.\n"
-        "3. Eğer cümlede bilgi hatası, anlatım bozukluğu veya eksiklik varsa (ama tekrar değilse), "
-        "düzeltilmiş nihai cümleyi doğrudan yaz.\n"
-        "4. Asla açıklama, selamlama veya ek metin ekleme. Sadece onay token'ını, boş metni veya "
+        "2. ALAKALILIK KONTROLÜ (KRİTİK): Aday cümle, '[KULLANICI SORUSU]' ile GERÇEKTEN ilgili mi? "
+        "Cümle, sorulan konudan FARKLI bir konuya (örn. soru haberlerle ilgiliyken cümle güvenlik/başka "
+        "bir konudan bahsediyorsa, ya da RAG'den gelen alakasız bir geçmiş kayıt sızmışsa) mi ait? "
+        "Eğer cümle konu dışıysa/alakasızsa, ASLA SENTENCE_OK ile onaylama — BOŞ bir metin ('') döndür.\n"
+        "3. BÜTÜNLÜK/OKUNABİLİRLİK KONTROLÜ: Aday cümle yarım, anlamsız, dilbilgisi açısından bozuk "
+        "veya ham/işlenmemiş veri gibi mi görünüyor (örn. bir web arama sonucunun başlığı ile snippet'i "
+        "birbirine karışmış, cümle tamamlanmamış)? Eğer öyleyse düzeltilmiş, akıcı bir cümle üret.\n"
+        f"4. Eğer aday cümle yukarıdaki 3 kontrolden de geçiyorsa (tekrar değil, alakalı, akıcı) VE "
+        f"tamamen doğru ve kaliteliyse, SADECE '{SENTENCE_APPROVAL_TOKEN}' yaz.\n"
+        "5. Eğer cümlede bilgi hatası, anlatım bozukluğu veya eksiklik varsa (ama tekrar/alakasız "
+        "değilse), düzeltilmiş nihai cümleyi doğrudan yaz.\n"
+        "6. Asla açıklama, selamlama veya ek metin ekleme. Sadece onay token'ını, boş metni veya "
         "düzeltilmiş cümlenin kendisini döndür."
     )
 
@@ -129,6 +146,7 @@ async def relay_sentence_to_usta(
         shared_context.to_system_blocks() +
         [{"role": "system", "content": usta_sentence_system_prompt}] +
         [
+            {"role": "system", "content": f"[KULLANICI SORUSU]:\n{shared_context.user_query}"},
             {"role": "system", "content": f"[ÖNCEKİ CÜMLELER (BAĞLAM)]:\n{context_history}"},
             {"role": "user", "content": f"[ADAY CÜMLE]:\n{candidate_sentence}"}
         ]

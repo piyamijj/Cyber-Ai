@@ -434,7 +434,7 @@ export default function CyberChat() {
                     className={`flex ${isUser ? "justify-end" : "justify-start"}`}
                   >
                     <div
-                      className={`max-w-[85%] rounded-xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap border ${
+                      className={`max-w-[85%] rounded-xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap break-words border ${
                         isUser
                           ? "bg-cyber-panel border-cyber-border text-white"
                           : "bg-cyber-surface border-cyber-border/50 text-cyber-text"
@@ -449,7 +449,7 @@ export default function CyberChat() {
               {/* Streaming Message Placeholder */}
               {isStreaming && streamingContent && (
                 <div className="flex justify-start">
-                  <div className="max-w-[85%] rounded-xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap border bg-cyber-surface border-cyber-border/50 text-cyber-text">
+                  <div className="max-w-[85%] rounded-xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap break-words border bg-cyber-surface border-cyber-border/50 text-cyber-text">
                     {streamingContent}
                     <span className="inline-block w-1.5 h-4 ml-1 bg-cyber-accent animate-pulse align-middle" />
                   </div>

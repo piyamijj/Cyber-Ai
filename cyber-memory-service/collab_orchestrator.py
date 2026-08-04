@@ -66,19 +66,35 @@ class SharedContext:
         blocks = []
         
         # 1. RAG (Geçmiş Hafıza) Bağlamı
+        # KALİTE DÜZELTMESİ (canlı site testinde bulundu): "sadece gerekliyse kullan" talimatı
+        # tek başına yetersiz kaldı — model, SORUYLA ALAKASIZ bir geçmiş kaydı ("Havva",
+        # "güvenlik") bile bazen cevaba karıştırdı. Artık AÇIKÇA "sadece kullanıcının GÜNCEL
+        # sorusuyla doğrudan ilgiliyse kullan, İLGİSİZSE TAMAMEN YOK SAY" deniyor.
         if self.rag_text.strip():
             blocks.append({
                 "role": "system",
-                "content": f"Kullanıcının geçmiş hafızasından alınan alakalı bilgiler (sadece gerekliyse kullan):\n{self.rag_text.strip()}"
+                "content": (
+                    "Kullanıcının geçmiş hafızasından alınan bilgiler (AŞAĞIDAKİLERİ SADECE kullanıcının "
+                    "ŞU ANKİ sorusuyla DOĞRUDAN ve AÇIKÇA ilgiliyse kullan; ilgisizse TAMAMEN YOK SAY, "
+                    f"cevaba dahil etme, bahsetme bile):\n{self.rag_text.strip()}"
+                )
             })
             
         # 2. Web Arama Bağlamı
+        # KALİTE DÜZELTMESİ (canlı site testinde bulundu): "MUTLAKA KULLAN" talimatı, küçük
+        # çırak modelin (0.5B) ham başlık+snippet listesini OLDUĞU GİBİ kopyalamasına yol açtı
+        # (bozuk/yarım/tutarsız görünen bir "haber listesi" üretildi). Artık AÇIKÇA "bu ham veriyi
+        # kelimesi kelimesine kopyalama, ANLAMLI ve AKICI cümlelere dönüştürerek özetle" deniyor.
         if self.web_text.strip():
             blocks.append({
                 "role": "system",
                 "content": (
-                    "GERÇEK ZAMANLI GÜNCEL WEB ARAMA SONUÇLARI (MUTLAKA KULLAN, ASLA 'güncel veri sağlayamam' deme, "
-                    f"ASLA rakam/tarih uydurma — SADECE aşağıdaki bilgiyi kullan):\n{self.web_text.strip()}"
+                    "GERÇEK ZAMANLI GÜNCEL WEB ARAMA SONUÇLARI (ham başlık+özet listesi halindedir). "
+                    "MUTLAKA bu bilgiyi kullan, ASLA 'güncel veri sağlayamam' deme, ASLA rakam/tarih "
+                    "uydurma — SADECE aşağıdaki bilgiyi temel al. AMA bu listeyi OLDUĞU GİBİ, ham "
+                    "başlık parçaları halinde KOPYALAYIP YAPIŞTIRMA — her bir sonucu OKUYUP ANLAYARAK, "
+                    "kullanıcının sorusuna doğrudan cevap veren, akıcı ve tutarlı TAM CÜMLELER halinde "
+                    f"özetle:\n{self.web_text.strip()}"
                 )
             })
             
@@ -89,7 +105,8 @@ async def fetch_shared_context(
     user_query: str,
     memory_search_fn: Callable[[str], Any],
     web_search_fn: Callable[[str], Any],
-    decide_fn: Callable[[str], Any]
+    decide_fn: Callable[[str], Any],
+    is_trivial_fn: Optional[Callable[[str], bool]] = None
 ) -> SharedContext:
     """
     Kullanıcı sorusunu aldığı ilk anda TÜM gerekli doküman parçacıklarını (RAG ve Web Arama)
@@ -97,16 +114,34 @@ async def fetch_shared_context(
     
     Asenkron yapısı sayesinde, karar mekanizması (/decide) ve yerel RAG araması (/search)
     eş zamanlı (paralel) olarak tetiklenir. Web araması ise karara bağlı olarak ardışıl çalışır.
+
+    KALİTE GUARDRAIL'İ (canlı site testinde bulundu): Kullanıcı sadece 'Merhaba' yazdığında
+    bile RAG araması tetiklenip alakasız bir geçmiş hafıza kaydının ('Havva', 'güvenlik'
+    konulu) modelin cevabını tamamen konu dışına kaydırdığı gözlemlendi. `is_trivial_fn`
+    opsiyonel parametresi verilirse (main.py'deki is_likely_trivial fonksiyonu), kısa/
+    selamlaşma niteliğindeki sorularda RAG araması EN BAŞTAN atlanır — bu hem alakasız
+    sonuç sızma riskini ortadan kaldırır hem de gereksiz bir Qdrant sorgusundan tasarruf
+    sağlar. SEARCH_SCORE_THRESHOLD'un sıkılaştırılmasıyla (main.py) birlikte bu, iki
+    katmanlı bir savunmadır.
     """
     logger.info(f"Shared Context oluşturuluyor. Sorgu: '{user_query[:50]}...'")
     start_time = time.monotonic()
 
-    # 1. Aşama: Karar mekanizması ve Yerel RAG aramasını paralel başlatıyoruz
-    decide_task = asyncio.create_task(decide_fn(user_query))
-    rag_task = asyncio.create_task(memory_search_fn(user_query))
+    query_is_trivial = bool(is_trivial_fn and is_trivial_fn(user_query))
+    if query_is_trivial:
+        logger.info("Sorgu trivial/selamlaşma niteliğinde görüldü, RAG araması ATLANIYOR.")
 
-    # İki işlemin de tamamlanmasını bekliyoruz
-    decide_result, rag_result = await asyncio.gather(decide_task, rag_task)
+    # 1. Aşama: Karar mekanizması her zaman çalışır (web araması gerekip gerekmediğine karar
+    # vermesi gerekiyor); yerel RAG araması ise sadece sorgu trivial DEĞİLSE paralel başlatılır.
+    decide_task = asyncio.create_task(decide_fn(user_query))
+    rag_task = asyncio.create_task(memory_search_fn(user_query)) if not query_is_trivial else None
+
+    # İki işlemin de tamamlanmasını bekliyoruz (rag_task yoksa sadece decide_task'ı bekleriz)
+    if rag_task is not None:
+        decide_result, rag_result = await asyncio.gather(decide_task, rag_task)
+    else:
+        decide_result = await decide_task
+        rag_result = None
 
     # RAG metnini hazırlıyoruz
     rag_text = ""
@@ -312,6 +347,14 @@ async def run_draft_critique_round(
     # tekrarı önler (birincil savunma), bu guardrail ise üretim sonrası bir güvenlik ağı
     # olarak, tekrar hâlâ oluşmuşsa usta'nın bunu YAKALAYIP reddetmesini sağlar (ikincil
     # savunma — iki katmanlı, tek noktaya güvenmiyoruz).
+    # KALİTE GUARDRAIL'İ 3 (alakalılık kontrolü — canlı site testinde bulunan KRİTİK EKSİK):
+    # Kullanıcı canlı sitede sorduğu bir soruya (örn. güncel haberler) gelen nihai cevabın
+    # SONUNA tamamen alakasız bir cümle ("güvenlik" konulu) eklendiği, ayrıca "Merhaba" gibi
+    # basit bir mesaja bile RAG'den sızan alakasız bir geçmiş kayıt ("Havva") yüzünden konu
+    # dışı bir cevap üretildiği gözlemlendi. Önceki kalite kontrolü sadece TEKRAR ve ANLAMLILIK
+    # kontrolü yapıyordu — "cevap gerçekten SORULAN KONUYLA ilgili mi" diye bakmıyordu. Bu
+    # üçüncü kural, usta'nın alakasız/konu dışı içeriği (tekrar veya anlamsızlık olmasa bile)
+    # yakalayıp temizlemesini zorunlu kılar.
     usta_system_prompt = (
         "Sen Cyber AI projesinin 'Usta' (Critique/Editor) modelisin. Görevin, çırak modelin ürettiği "
         "taslak cevabı, Shared Context (RAG ve Web Arama) verileri doğrultusunda titizlikle incelemek, "
@@ -321,11 +364,22 @@ async def run_draft_critique_round(
         "(art arda veya farklı yerlerde) tekrarlanıyor mu? Bu bir model hatasıdır (dejenere/repetition "
         "çıktı) — böyle bir taslağı ASLA onaylama, tekrarları temizleyip tek, akıcı bir cevap üret.\n"
         "2. ANLAMLILIK KONTROLÜ: Taslak, kullanıcının sorusuna gerçekten anlamlı ve tutarlı bir cevap "
-        "veriyor mu, yoksa döngüye girmiş/anlamsız bir metin mi? Anlamsızsa onaylama, düzelt.\n\n"
-        "Eğer taslak yukarıdaki kontrollerden geçiyorsa VE tamamen doğru, eksiksiz ve mükemmelse, "
+        "veriyor mu, yoksa döngüye girmiş/anlamsız bir metin mi? Anlamsızsa onaylama, düzelt.\n"
+        "3. ALAKALILIK KONTROLÜ (KRİTİK): Taslağın HER cümlesi kullanıcının SORDUĞU KONUYLA gerçekten "
+        "ilgili mi? Eğer taslakta konu dışı, alakasız bir cümle/paragraf varsa (örn. Shared Context'teki "
+        "geçmiş hafıza/RAG kaydından veya web arama sonucundan sızan, ama sorulan konuyla İLGİSİ OLMAYAN "
+        "bir bilgi), bu cümleyi/paragrafı TAMAMEN ÇIKAR — cevabın SONUNA veya ARASINA alakasız bir konu "
+        "(örn. soru haberlerle ilgiliyken cevaba 'güvenlik' gibi bambaşka bir konudan bahseden bir cümle) "
+        "asla sızmamalı. Sadece kullanıcının sorduğu konuya odaklı, tutarlı bir cevap üret.\n"
+        "4. HAM VERİ KONTROLÜ: Web arama sonuçları (varsa) ham başlık+snippet listesi olarak Shared "
+        "Context'te bulunur — bunları OLDUĞU GİBİ kopyalayıp yapıştırma. Eğer taslak, web arama "
+        "sonuçlarını işlenmemiş/anlamsız parçalar halinde (yarım cümle, başlık-snippet karışımı, "
+        "tutarsız liste öğeleri) sunuyorsa, bunları GERÇEK VE OKUNABILIR cümlelere dönüştürerek özetle.\n\n"
+        "Eğer taslak yukarıdaki 4 kontrolden de geçiyorsa VE tamamen doğru, eksiksiz ve mükemmelse, "
         f"cevabına SADECE VE SADECE '{APPROVAL_TOKEN}' yazarak onay ver. Ekstra hiçbir açıklama ekleme.\n"
-        "Eğer taslakta düzeltilmesi gereken yerler varsa (tekrar, hata, eksiklik fark etmez), "
-        "düzeltilmiş nihai cevabı doğrudan üret — ASLA APPROVAL_TOKEN ile birlikte hatalı içerik verme."
+        "Eğer taslakta düzeltilmesi gereken yerler varsa (tekrar, alakasızlık, ham veri, hata, eksiklik "
+        "fark etmez), düzeltilmiş nihai cevabı doğrudan üret — ASLA APPROVAL_TOKEN ile birlikte hatalı "
+        "içerik verme."
     )
 
     # Kuyruktan gelen verileri canlı olarak okuyoruz
